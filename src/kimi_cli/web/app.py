@@ -40,6 +40,12 @@ from kimi_cli.web.auth import (
 )
 from kimi_cli.web.runner.process import KimiCLIRunner
 
+# Container mode imports
+try:
+    from kimi_cli.web.runner.container import ContainerRunner
+except Exception:
+    ContainerRunner = None  # type: ignore[misc,assignment]
+
 # Configure logging based on LOG_LEVEL environment variable
 _log_level = os.environ.get("LOG_LEVEL", "WARNING").upper()
 logger.remove()
@@ -153,8 +159,20 @@ def create_app(
         app.state.max_public_path_depth = max_public_path_depth
         app.state.lan_only = lan_only
 
-        # Start KimiCLI runner
-        runner = KimiCLIRunner()
+        # Start KimiCLI runner (containerized or local)
+        use_containers = _load_env_flag("KIMI_USE_CONTAINERS")
+        if use_containers and ContainerRunner is not None:
+            runner = ContainerRunner(
+                image=os.environ.get("SANDBOX_IMAGE", "kimi-agent-sandbox:latest"),
+                network=os.environ.get("DOCKER_NETWORK"),
+                resource_limits={
+                    "cpus": os.environ.get("SANDBOX_CPU_LIMIT", "2"),
+                    "memory": os.environ.get("SANDBOX_MEMORY_LIMIT", "4g"),
+                    "pids": os.environ.get("SANDBOX_PID_LIMIT", "1000"),
+                },
+            )
+        else:
+            runner = KimiCLIRunner()
         app.state.runner = runner
         runner.start()
 

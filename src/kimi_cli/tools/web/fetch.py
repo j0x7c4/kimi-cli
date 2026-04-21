@@ -19,6 +19,29 @@ class Params(BaseModel):
     url: str = Field(description="The URL to fetch content from.")
 
 
+# Modern browser headers to reduce bot detection
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,image/apng,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate",
+    "DNT": "1",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
+}
+
+
 class FetchURL(CallableTool2[Params]):
     name: str = "FetchURL"
     description: str = load_desc(Path(__file__).parent / "fetch.md", {})
@@ -42,6 +65,7 @@ class FetchURL(CallableTool2[Params]):
     @staticmethod
     async def fetch_with_http_get(params: Params) -> ToolReturnValue:
         builder = ToolResultBuilder(max_line_length=None)
+        resp_text: str | None = None
         try:
             # Fetching arbitrary web pages can take a while on large/slow sites.
             fetch_timeout = aiohttp.ClientTimeout(total=180, sock_read=60, sock_connect=15)
@@ -49,12 +73,7 @@ class FetchURL(CallableTool2[Params]):
                 new_client_session(timeout=fetch_timeout) as session,
                 session.get(
                     params.url,
-                    headers={
-                        "User-Agent": (
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                            "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-                        ),
-                    },
+                    headers=_BROWSER_HEADERS.copy(),
                 ) as response,
             ):
                 if response.status >= 400:
@@ -63,6 +82,12 @@ class FetchURL(CallableTool2[Params]):
                         status=response.status,
                         url=params.url,
                     )
+                    # Fallback to Playwright for 403 (bot detection)
+                    if response.status == 403:
+                        logger.info(
+                            "FetchURL falling back to Playwright for {url}", url=params.url
+                        )
+                        return await FetchURL._fetch_with_playwright(params)
                     return builder.error(
                         (
                             f"Failed to fetch URL. Status: {response.status}. "
@@ -120,6 +145,83 @@ class FetchURL(CallableTool2[Params]):
 
         builder.write(extracted_text)
         return builder.ok("The returned content is the main text content extracted from the page.")
+
+    @staticmethod
+    async def _fetch_with_playwright(params: Params) -> ToolReturnValue:
+        """Fallback fetch using Playwright + Chromium for bot-protected sites."""
+        builder = ToolResultBuilder(max_line_length=None)
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            return builder.error(
+                "Playwright is not available. Cannot fetch bot-protected pages.",
+                brief="Playwright not installed",
+            )
+
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-blink-features=AutomationControlled",
+                    ],
+                )
+                context = await browser.new_context(
+                    user_agent=_BROWSER_HEADERS["User-Agent"],
+                    viewport={"width": 1920, "height": 1080},
+                )
+                page = await context.new_page()
+                await page.goto(
+                    params.url,
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+                # Wait a moment for any lazy-loaded content
+                await page.wait_for_timeout(2000)
+                content = await page.content()
+                await browser.close()
+        except Exception as e:
+            logger.warning(
+                "FetchURL Playwright fallback failed: {error}, url={url}",
+                error=e,
+                url=params.url,
+            )
+            return builder.error(
+                f"Failed to fetch URL via browser fallback: {e}",
+                brief="Browser fetch failed",
+            )
+
+        if not content:
+            return builder.ok(
+                "The page content is empty.",
+                brief="Empty page content",
+            )
+
+        extracted_text = trafilatura.extract(
+            content,
+            include_comments=True,
+            include_tables=True,
+            include_formatting=False,
+            output_format="txt",
+            with_metadata=True,
+        )
+
+        if not extracted_text:
+            return builder.error(
+                (
+                    "Failed to extract meaningful content from the page. "
+                    "The page may require interaction or specific browser features."
+                ),
+                brief="No content extracted via browser",
+            )
+
+        builder.write(extracted_text)
+        return builder.ok(
+            "The returned content was fetched via browser automation."
+        )
 
     async def _fetch_with_service(self, params: Params) -> ToolReturnValue:
         assert self._service_config is not None
