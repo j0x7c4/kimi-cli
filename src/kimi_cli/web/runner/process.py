@@ -24,7 +24,7 @@ from starlette.websockets import WebSocket, WebSocketState
 
 from kimi_cli import logger
 from kimi_cli.config import load_config
-from kimi_cli.llm import ModelCapability
+from kimi_cli.llm import ModelCapability, derive_model_capabilities
 from kimi_cli.utils.subprocess_env import get_clean_env
 from kimi_cli.web.models import (
     SessionNoticeEvent,
@@ -448,8 +448,9 @@ class SessionProcess:
         # Check model capabilities
         config = load_config()
         capabilities: set[ModelCapability] = set()
-        if config.default_model:
-            capabilities = config.models[config.default_model].capabilities or set()
+        if config.default_model and config.default_model in config.models:
+            model_config = config.models[config.default_model]
+            capabilities = derive_model_capabilities(model_config)
         is_vision = "image_in" in capabilities
         is_video_in = "video_in" in capabilities
 

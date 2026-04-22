@@ -91,8 +91,29 @@ def augment_provider_with_env_vars(provider: LLMProvider, model: LLMModel) -> di
                 provider.base_url = base_url
             if api_key := os.getenv("OPENAI_API_KEY"):
                 provider.api_key = SecretStr(api_key)
+            if model_name := os.getenv("OPENAI_MODEL_NAME"):
+                model.model = model_name
+                applied["OPENAI_MODEL_NAME"] = model_name
+        case "anthropic":
+            if base_url := os.getenv("ANTHROPIC_BASE_URL"):
+                provider.base_url = base_url
+            if api_key := os.getenv("ANTHROPIC_API_KEY"):
+                provider.api_key = SecretStr(api_key)
+            if model_name := os.getenv("ANTHROPIC_MODEL_NAME"):
+                model.model = model_name
+                applied["ANTHROPIC_MODEL_NAME"] = model_name
         case _:
             pass
+
+    # Model capabilities can be overridden for any provider
+    if capabilities := os.getenv("KIMI_MODEL_CAPABILITIES"):
+        caps_lower = (cap.strip().lower() for cap in capabilities.split(",") if cap.strip())
+        model.capabilities = set(
+            cast(ModelCapability, cap)
+            for cap in caps_lower
+            if cap in get_args(ModelCapability.__value__)
+        )
+        applied["KIMI_MODEL_CAPABILITIES"] = capabilities
 
     return applied
 
@@ -285,6 +306,15 @@ def derive_model_capabilities(model: LLMModel) -> set[ModelCapability]:
     # These models support thinking but can be toggled on/off
     elif model.model in {"kimi-for-coding", "kimi-code"}:
         capabilities.update(("thinking", "image_in", "video_in"))
+    # kimi-k2 supports thinking, image_in, and video_in
+    if model.model.lower().startswith("kimi-k2"):
+        capabilities.update(("thinking", "image_in", "video_in"))
+    # OpenAI GPT-4o and o1/o3 series support vision
+    if any(name in model.model.lower() for name in ("gpt-4o", "o1", "o3")):
+        capabilities.add("image_in")
+    # Anthropic Claude 3/3.5/3.7 supports vision
+    if "claude-3" in model.model.lower():
+        capabilities.add("image_in")
     return capabilities
 
 
