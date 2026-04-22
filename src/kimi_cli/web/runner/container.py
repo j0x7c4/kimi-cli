@@ -157,6 +157,11 @@ class ContainerSessionProcess(SessionProcess):
         share_dir = os.environ.get("KIMI_SHARE_DIR", "/data/sessions")
         cmd.extend(["-v", f"session-data:{share_dir}"])
 
+        # Mount custom skills directory if configured
+        custom_skills = os.environ.get("CUSTOM_SKILLS_HOST_PATH")
+        if custom_skills:
+            cmd.extend(["-v", f"{custom_skills}:/root/.config/agents/skills:ro"])
+
         # Forward known environment variables
         for var_name in _SANDBOX_ENV_VARS:
             value = os.environ.get(var_name)
