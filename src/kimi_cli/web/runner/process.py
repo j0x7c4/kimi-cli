@@ -23,7 +23,7 @@ from pydantic import TypeAdapter
 from starlette.websockets import WebSocket, WebSocketState
 
 from kimi_cli import logger
-from kimi_cli.config import load_config
+from kimi_cli.config import LLMModel, load_config
 from kimi_cli.llm import ModelCapability, derive_model_capabilities
 from kimi_cli.utils.subprocess_env import get_clean_env
 from kimi_cli.web.models import (
@@ -451,6 +451,11 @@ class SessionProcess:
         if config.default_model and config.default_model in config.models:
             model_config = config.models[config.default_model]
             capabilities = derive_model_capabilities(model_config)
+        else:
+            # Fallback: derive from env var when config file has no model entry
+            env_model_name = os.environ.get("KIMI_MODEL_NAME") or os.environ.get("OPENAI_MODEL_NAME") or os.environ.get("ANTHROPIC_MODEL_NAME")
+            if env_model_name:
+                capabilities = derive_model_capabilities(LLMModel(provider="", model=env_model_name, max_context_size=100_000))
         is_vision = "image_in" in capabilities
         is_video_in = "video_in" in capabilities
 
