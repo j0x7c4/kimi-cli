@@ -187,14 +187,12 @@ class ContainerSessionProcess(SessionProcess):
         # Security: drop privileges
         cmd.extend(["--privileged=false"])
 
-        # Image + worker command
-        cmd.extend([
-            self._image,
-            "python",
-            "-m",
-            "kimi_cli.web.runner.worker",
-            str(self.session_id),
-        ])
+        # Pass session ID so start-sandbox.sh knows which worker to launch
+        cmd.extend(["-e", f"KIMI_SESSION_ID={self.session_id}"])
+
+        # Image + entrypoint command (runs start-sandbox.sh which launches
+        # Xvfb, kernel server, browser guard, and finally the worker)
+        cmd.extend([self._image, "/start-sandbox.sh"])
 
         return cmd
 
