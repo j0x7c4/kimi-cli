@@ -51,6 +51,11 @@ _SANDBOX_ENV_VARS = [
     "CHROME_INIT_URL",
     "CHROME_FLAGS",
     "USE_CDP",
+    # HuggingFace
+    "HF_HOME",
+    "HF_TOKEN",
+    "HUGGINGFACE_HUB_CACHE",
+    "TRANSFORMERS_CACHE",
 ]
 
 
@@ -161,6 +166,12 @@ class ContainerSessionProcess(SessionProcess):
         custom_skills = os.environ.get("CUSTOM_SKILLS_HOST_PATH")
         if custom_skills:
             cmd.extend(["-v", f"{custom_skills}:/root/.config/agents/skills:ro"])
+
+        # Mount HuggingFace cache directory if configured
+        hf_cache = os.environ.get("HF_CACHE_HOST_PATH")
+        if hf_cache:
+            cmd.extend(["-v", f"{hf_cache}:/root/.cache/huggingface"])
+            cmd.extend(["-e", "HF_HOME=/root/.cache/huggingface"])
 
         # Forward known environment variables
         for var_name in _SANDBOX_ENV_VARS:
