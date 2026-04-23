@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
@@ -98,9 +100,82 @@ def _build_global_config() -> GlobalConfig:
             )
         )
 
+    # Fallback: synthesize models from environment variables when no config file exists
+    if not models:
+        env_models: list[ConfigModel] = []
+
+        # Kimi / Moonshot
+        kimi_key = os.environ.get("KIMI_API_KEY")
+        if kimi_key:
+            model_name = os.environ.get("KIMI_MODEL_NAME", "kimi-k2")
+            max_ctx = int(os.environ.get("KIMI_MODEL_MAX_CONTEXT_SIZE", "262144"))
+            m = LLMModel(provider="kimi", model=model_name, max_context_size=max_ctx)
+            caps = derive_model_capabilities(m)
+            env_models.append(
+                ConfigModel(
+                    name=model_name,
+                    model=model_name,
+                    provider="kimi",
+                    provider_type="kimi",
+                    max_context_size=max_ctx,
+                    capabilities=caps or None,
+                )
+            )
+
+        # OpenAI
+        openai_key = os.environ.get("OPENAI_API_KEY")
+        if openai_key:
+            model_name = os.environ.get("OPENAI_MODEL_NAME", "gpt-4o")
+            max_ctx = int(os.environ.get("OPENAI_MODEL_MAX_CONTEXT_SIZE", "128000"))
+            m = LLMModel(provider="openai", model=model_name, max_context_size=max_ctx)
+            caps = derive_model_capabilities(m)
+            env_models.append(
+                ConfigModel(
+                    name=model_name,
+                    model=model_name,
+                    provider="openai",
+                    provider_type="openai_legacy",
+                    max_context_size=max_ctx,
+                    capabilities=caps or None,
+                )
+            )
+
+        # Anthropic
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+        if anthropic_key:
+            model_name = os.environ.get("ANTHROPIC_MODEL_NAME", "claude-3-5-sonnet-20241022")
+            max_ctx = int(os.environ.get("ANTHROPIC_MODEL_MAX_CONTEXT_SIZE", "200000"))
+            m = LLMModel(provider="anthropic", model=model_name, max_context_size=max_ctx)
+            caps = derive_model_capabilities(m)
+            env_models.append(
+                ConfigModel(
+                    name=model_name,
+                    model=model_name,
+                    provider="anthropic",
+                    provider_type="anthropic",
+                    max_context_size=max_ctx,
+                    capabilities=caps or None,
+                )
+            )
+
+        models = env_models
+
+        if not config.default_model and models:
+            llm_provider = os.environ.get("LLM_PROVIDER", "kimi").lower()
+            for m in models:
+                if m.provider == llm_provider:
+                    config.default_model = m.name
+                    break
+            if not config.default_model:
+                config.default_model = models[0].name
+
+    default_thinking = config.default_thinking
+    if not config.models and os.environ.get("LLM_THINKING"):
+        default_thinking = os.environ.get("LLM_THINKING", "false").lower() == "true"
+
     return GlobalConfig(
         default_model=config.default_model,
-        default_thinking=config.default_thinking,
+        default_thinking=default_thinking,
         models=models,
     )
 
