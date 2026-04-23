@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import mimetypes
 import os
@@ -35,6 +36,7 @@ from kimi_cli.web.models import (
     UpdateSessionRequest,
 )
 from kimi_cli.web.runner.messages import new_session_status_message, send_history_complete
+from kimi_cli.web.runner.container import ContainerRunner
 from kimi_cli.web.runner.process import KimiCLIRunner
 from kimi_cli.web.store.sessions import (
     JointSession,
@@ -459,6 +461,187 @@ async def get_session_upload_file(
     )
 
 
+async def _get_file_from_container(
+    session_id: UUID,
+    path: str,
+    work_dir: Path,
+    restrict_sensitive_apis: bool,
+    max_path_depth: int,
+) -> Response:
+    """Read a file or list a directory from a running session container."""
+    container_name = f"kimi-session-{session_id}"
+
+    # Verify the container is running before attempting to read from it
+    check_proc = await asyncio.create_subprocess_exec(
+        "docker",
+        "inspect",
+        "--format={{.State.Running}}",
+        container_name,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await check_proc.communicate()
+    if check_proc.returncode != 0 or stdout.decode().strip() != "true":
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Session container is not running",
+        )
+
+    script = b"""import json, os, sys, base64
+from pathlib import Path
+
+work_dir = Path(os.environ["_WORK_DIR"]).resolve()
+path = os.environ["_PATH"]
+requested = work_dir / path
+file_path = requested.resolve()
+
+try:
+    rel = file_path.relative_to(work_dir)
+except ValueError:
+    print(json.dumps({"error": "traversal"}))
+    sys.exit(0)
+
+restrict = os.environ.get("_RESTRICT") == "true"
+max_depth = int(os.environ.get("_MAX_DEPTH", "6"))
+sensitive_parts = set(json.loads(os.environ["_SENSITIVE_PARTS"]))
+sensitive_exts = set(json.loads(os.environ["_SENSITIVE_EXTS"]))
+
+def is_sensitive(rel_path):
+    parts = [p for p in rel_path.parts if p not in ("", ".")]
+    for part in parts:
+        if part.startswith("."):
+            return True
+        if part.lower() in sensitive_parts:
+            return True
+    return rel_path.suffix.lower() in sensitive_exts
+
+if restrict:
+    rel_parts = [p for p in rel.parts if p not in ("", ".")]
+    if len(rel_parts) > max_depth:
+        print(json.dumps({"error": "toodeep"}))
+        sys.exit(0)
+    if is_sensitive(rel):
+        print(json.dumps({"error": "sensitive"}))
+        sys.exit(0)
+    try:
+        current = work_dir
+        for part in file_path.relative_to(work_dir).parts:
+            current = current / part
+            if current.is_symlink():
+                print(json.dumps({"error": "symlink"}))
+                sys.exit(0)
+    except (ValueError, OSError):
+        print(json.dumps({"error": "symlink"}))
+        sys.exit(0)
+
+if not file_path.exists():
+    print(json.dumps({"error": "notfound"}))
+    sys.exit(0)
+
+if file_path.is_dir():
+    entries = []
+    for sub in file_path.iterdir():
+        rel_sub = rel / sub.name
+        if restrict and is_sensitive(rel_sub):
+            continue
+        if sub.is_dir():
+            entries.append({"name": sub.name, "type": "directory"})
+        else:
+            try:
+                size = sub.stat().st_size
+            except OSError:
+                size = 0
+            entries.append({"name": sub.name, "type": "file", "size": size})
+    entries.sort(key=lambda x: (x["type"], x["name"]))
+    print(json.dumps({"type": "directory", "entries": entries}))
+else:
+    data = file_path.read_bytes()
+    print(json.dumps({"type": "file", "name": file_path.name, "data": base64.b64encode(data).decode()}))
+"""
+
+    proc = await asyncio.create_subprocess_exec(
+        "docker",
+        "exec",
+        "-i",
+        "-e",
+        f"_WORK_DIR={str(work_dir)}",
+        "-e",
+        f"_PATH={path}",
+        "-e",
+        f"_RESTRICT={'true' if restrict_sensitive_apis else 'false'}",
+        "-e",
+        f"_MAX_DEPTH={max_path_depth}",
+        "-e",
+        f"_SENSITIVE_PARTS={json.dumps(list(SENSITIVE_PATH_PARTS))}",
+        "-e",
+        f"_SENSITIVE_EXTS={json.dumps(list(SENSITIVE_PATH_EXTENSIONS))}",
+        container_name,
+        "python",
+        "-",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate(script)
+
+    if proc.returncode != 0:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to read from container: {stderr.decode()}",
+        )
+
+    try:
+        result = json.loads(stdout.decode())
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Invalid response from container: {e}",
+        )
+
+    error = result.get("error")
+    if error == "traversal":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid path: path traversal not allowed",
+        )
+    if error == "notfound":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found",
+        )
+    if error == "toodeep":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Path too deep for public access (max depth: {max_path_depth}).",
+        )
+    if error == "sensitive":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access to sensitive files is disabled.",
+        )
+    if error == "symlink":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Symbolic links are not allowed in public mode.",
+        )
+
+    if result.get("type") == "directory":
+        return Response(
+            content=json.dumps(result["entries"]), media_type="application/json"
+        )
+
+    content = base64.b64decode(result["data"])
+    media_type, _ = mimetypes.guess_type(result["name"])
+    encoded_filename = quote(result["name"], safe="")
+    return Response(
+        content=content,
+        media_type=media_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
+        },
+    )
+
+
 @router.get(
     "/{session_id}/files/{path:path}",
     summary="Get file or list directory from session work_dir",
@@ -476,8 +659,28 @@ async def get_session_file(
             detail="Session not found",
         )
 
-    # Security check: prevent path traversal attacks using resolve()
+    runner = request.app.state.runner
     work_dir = Path(str(session.kimi_cli_session.work_dir)).resolve()
+
+    # In container mode, read from the session container when it is alive
+    if isinstance(runner, ContainerRunner):
+        session_process = runner.get_session(session_id)
+        if session_process is not None and session_process.is_alive:
+            restrict_sensitive_apis = getattr(
+                request.app.state, "restrict_sensitive_apis", False
+            )
+            max_path_depth = (
+                getattr(request.app.state, "max_public_path_depth", None)
+                or DEFAULT_MAX_PUBLIC_PATH_DEPTH
+            )
+            return await _get_file_from_container(
+                session_id,
+                path,
+                work_dir,
+                restrict_sensitive_apis,
+                max_path_depth,
+            )
+
     requested_path = work_dir / path
     file_path = requested_path.resolve()
 
