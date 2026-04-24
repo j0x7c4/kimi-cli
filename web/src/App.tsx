@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChatStatus } from "ai";
 import { PromptInputProvider } from "@ai-elements";
 import { toast } from "sonner";
-import { PanelLeftOpen, PanelLeftClose } from "lucide-react";
+import { PanelLeftOpen, PanelLeftClose, LogOut, ShieldCheck } from "lucide-react";
 import { cn } from "./lib/utils";
 import { ResizablePanel, ResizablePanelGroup } from "./components/ui/resizable";
 import { ChatWorkspaceContainer } from "./features/chat/chat-workspace-container";
@@ -16,6 +16,9 @@ import { ThemeToggle } from "./components/ui/theme-toggle";
 import type { SessionStatus } from "./lib/api/models";
 import type { PanelSize, PanelImperativeHandle } from "react-resizable-panels";
 import { consumeAuthTokenFromUrl, setAuthToken } from "./lib/auth";
+import { useAuth } from "./hooks/useAuth";
+import { LoginPage } from "./features/auth/login-page";
+import { AdminPage } from "./features/admin/admin-page";
 
 /**
  * Get session ID from URL search params
@@ -46,6 +49,21 @@ const SIDEBAR_ANIMATION_MS = 250;
 function App() {
   // Initialize theme on app startup
   useTheme();
+
+  // Auth state
+  const { currentUser, isLoading: isAuthLoading, isAdmin, login, logout } = useAuth();
+
+  // Route: /admin or /admin/ -> render admin panel
+  const isAdminRoute = window.location.pathname.replace(/\/$/, "") === "/admin";
+
+  // Handle logout
+  const handleLogout = useCallback(async () => {
+    try {
+      await logout();
+    } catch {
+      // ignore errors, state is cleared anyway
+    }
+  }, [logout]);
 
   const sidebarElementRef = useRef<HTMLDivElement | null>(null);
   const sidebarPanelRef = useRef<PanelImperativeHandle | null>(null);
@@ -367,6 +385,38 @@ function App() {
     [forkSession],
   );
 
+  // Auth gates: loading, unauthenticated, admin route
+  if (isAuthLoading && !currentUser) {
+    return (
+      <div className="flex h-[100dvh] items-center justify-center bg-background text-muted-foreground text-sm">
+        Loading...
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return (
+      <>
+        <LoginPage onLogin={login} />
+        <Toaster position="top-right" richColors />
+      </>
+    );
+  }
+
+  if (isAdminRoute) {
+    if (!isAdmin) {
+      // Non-admin users attempting to access /admin are redirected to home.
+      window.location.replace("/");
+      return null;
+    }
+    return (
+      <>
+        <AdminPage currentUser={currentUser} />
+        <Toaster position="top-right" richColors />
+      </>
+    );
+  }
+
   const renderChatPanel = () => (
     <ChatWorkspaceContainer
       selectedSessionId={selectedSessionId}
@@ -475,18 +525,45 @@ function App() {
                     searchQuery={searchQuery}
                     onSearchQueryChange={handleSearchQueryChange}
                   />
-                  <div className="mt-auto flex items-center justify-between pl-2 pb-2 pr-2">
-                    <div className="flex items-center gap-2">
-                      <ThemeToggle />
+                  <div className="mt-auto flex flex-col gap-1 pl-2 pb-2 pr-2">
+                    {/* User info row */}
+                    <div className="flex items-center gap-1 min-w-0 px-1 py-1 rounded-md">
+                      <span className="truncate text-xs text-muted-foreground flex-1 min-w-0" title={currentUser.username}>
+                        {currentUser.username}
+                      </span>
+                      {isAdmin && (
+                        <a
+                          href="/admin"
+                          title="Admin Panel"
+                          className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary/50 hover:text-foreground shrink-0"
+                        >
+                          <ShieldCheck className="size-3.5" />
+                        </a>
+                      )}
+                      <button
+                        type="button"
+                        title="Sign out"
+                        aria-label="Sign out"
+                        className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary/50 hover:text-foreground shrink-0"
+                        onClick={handleLogout}
+                      >
+                        <LogOut className="size-3.5" />
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      aria-label="Collapse sidebar"
-                      className="inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary/50 hover:text-foreground"
-                      onClick={handleCollapseSidebar}
-                    >
-                      <PanelLeftClose className="size-4" />
-                    </button>
+                    {/* Theme toggle + collapse */}
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <ThemeToggle />
+                      </div>
+                      <button
+                        type="button"
+                        aria-label="Collapse sidebar"
+                        className="inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary/50 hover:text-foreground"
+                        onClick={handleCollapseSidebar}
+                      >
+                        <PanelLeftClose className="size-4" />
+                      </button>
+                    </div>
                   </div>
                 </div>
               </ResizablePanel>
@@ -556,7 +633,30 @@ function App() {
                 onSearchQueryChange={handleSearchQueryChange}
               />
             </div>
-            <div className="flex items-center justify-between border-t px-3 py-2">
+            <div className="flex flex-col gap-1 border-t px-3 py-2">
+              <div className="flex items-center gap-1 min-w-0">
+                <span className="truncate text-xs text-muted-foreground flex-1 min-w-0" title={currentUser.username}>
+                  {currentUser.username}
+                </span>
+                {isAdmin && (
+                  <a
+                    href="/admin"
+                    title="Admin Panel"
+                    className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary/50 hover:text-foreground shrink-0"
+                  >
+                    <ShieldCheck className="size-3.5" />
+                  </a>
+                )}
+                <button
+                  type="button"
+                  title="Sign out"
+                  aria-label="Sign out"
+                  className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary/50 hover:text-foreground shrink-0"
+                  onClick={handleLogout}
+                >
+                  <LogOut className="size-3.5" />
+                </button>
+              </div>
               <ThemeToggle />
             </div>
           </div>
