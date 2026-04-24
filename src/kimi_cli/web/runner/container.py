@@ -159,9 +159,15 @@ class ContainerSessionProcess(SessionProcess):
         if self._network:
             cmd.extend(["--network", self._network])
 
-        # Mount shared data volume
+        # Mount shared data volume.
+        # KIMI_SESSION_DATA_DIR is the host-side path (bind mount).
+        # KIMI_SHARE_DIR is the in-container mount point.
+        # We use the host path so that sandbox containers (spawned via the
+        # Docker socket from inside the gateway container) see the same data
+        # as the gateway itself.
         share_dir = os.environ.get("KIMI_SHARE_DIR", "/data/sessions")
-        cmd.extend(["-v", f"session-data:{share_dir}"])
+        host_share_dir = os.environ.get("KIMI_SESSION_DATA_DIR", share_dir)
+        cmd.extend(["-v", f"{host_share_dir}:{share_dir}"])
 
         # Mount custom skills directory if configured
         custom_skills = os.environ.get("CUSTOM_SKILLS_HOST_PATH")

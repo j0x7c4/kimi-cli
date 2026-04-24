@@ -249,11 +249,13 @@ async def replay_history(ws: WebSocket, session_dir: Path) -> None:
 
 @router.get("/", summary="List all sessions")
 async def list_sessions(
+    request: Request,
     runner: KimiCLIRunner = Depends(get_runner),
     limit: int = 100,
     offset: int = 0,
     q: str | None = None,
     archived: bool | None = None,
+    all: bool = False,
 ) -> list[Session]:
     """List sessions with optional pagination and search.
 
@@ -264,7 +266,10 @@ async def list_sessions(
         archived: Filter by archived status.
             - None (default): Only return non-archived sessions.
             - True: Only return archived sessions.
+        all: Admin-only flag; when True, return sessions for all users.
     """
+    from kimi_cli.web.user_auth import get_current_user as _get_current_user
+
     if limit <= 0:
         limit = 100
     if limit > 500:
@@ -275,7 +280,24 @@ async def list_sessions(
     # Run auto-archive in background (throttled internally, runs at most once per 5 minutes)
     await asyncio.to_thread(run_auto_archive)
 
+    current_user = _get_current_user(request)
+
     sessions = load_sessions_page(limit=limit, offset=offset, query=q, archived=archived)
+
+    # Filter by owner when a logged-in non-admin user requests sessions,
+    # or when an admin does not pass ?all=true.
+    # When no user is authenticated at all (anonymous / static-token-only mode)
+    # do NOT expose sessions owned by other users; only return sessions that
+    # have no owner_id set (legacy / pre-multi-user sessions).
+    if current_user is not None:
+        is_admin = current_user.get("role") == "admin"
+        if not is_admin or not all:
+            owner_id = current_user["id"]
+            sessions = [s for s in sessions if getattr(s, "owner_id", None) == owner_id]
+    else:
+        # Unauthenticated (static-token-only) callers may only see ownerless sessions.
+        sessions = [s for s in sessions if getattr(s, "owner_id", None) is None]
+
     for session in sessions:
         session_process = runner.get_session(session.session_id)
         session.is_running = session_process is not None and session_process.is_running
@@ -298,7 +320,10 @@ async def get_session(
 
 
 @router.post("/", summary="Create a new session")
-async def create_session(request: CreateSessionRequest | None = None) -> Session:
+async def create_session(
+    http_request: Request,
+    request: CreateSessionRequest | None = None,
+) -> Session:
     """Create a new session."""
     # Use provided work_dir or default to user's home directory
     if request and request.work_dir:
@@ -335,6 +360,18 @@ async def create_session(request: CreateSessionRequest | None = None) -> Session
         work_dir = KaosPath.unsafe_from_local_path(Path.home())
     kimi_cli_session = await KimiCLISession.create(work_dir=work_dir)
     context_file = kimi_cli_session.dir / "context.jsonl"
+
+    # Persist owner_id so session list filtering works correctly
+    from kimi_cli.web.user_auth import get_current_user as _get_current_user
+
+    current_user = _get_current_user(http_request)
+    if current_user is not None:
+        from kimi_cli.session_state import load_session_state, save_session_state
+
+        _state = load_session_state(kimi_cli_session.dir)
+        _state.owner_id = current_user["id"]
+        save_session_state(_state, kimi_cli_session.dir)
+
     invalidate_sessions_cache()
     invalidate_work_dirs_cache()
     return Session(

@@ -41,6 +41,8 @@ class SessionState(BaseModel):
     auto_archive_exempt: bool = False
     # Todo list state
     todos: list[TodoItemState] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
+    # Multi-user ownership
+    owner_id: str | None = None  # user ID of the user who created this session
 
 
 _LEGACY_METADATA_FILENAME = "metadata.json"

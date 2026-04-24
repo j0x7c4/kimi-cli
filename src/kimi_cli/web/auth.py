@@ -158,6 +158,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         if not path.startswith("/api/"):
             return await call_next(request)
+        # Auth endpoints are always public (handle their own authentication)
+        if path.startswith("/api/auth/"):
+            return await call_next(request)
 
         if self._enforce_origin:
             origin = request.headers.get("origin")
@@ -170,10 +173,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if self._session_token:
             provided = extract_token_from_request(request)
             if not verify_token(provided, self._session_token):
-                return JSONResponse(
-                    status_code=401,
-                    content={"detail": "Unauthorized"},
-                )
+                # Also accept cookie-based user sessions (multi-user auth).
+                # If the request carries a valid kimi_session cookie the
+                # per-route dependency (require_current_user / require_admin)
+                # will validate it; we only need to let it through here.
+                cookie_token = request.cookies.get("kimi_session")
+                if not cookie_token:
+                    return JSONResponse(
+                        status_code=401,
+                        content={"detail": "Unauthorized"},
+                    )
 
         return await call_next(request)
 

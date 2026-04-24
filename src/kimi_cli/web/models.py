@@ -72,6 +72,7 @@ class Session(BaseModel):
     work_dir: str | None = Field(default=None, description="Working directory for the session")
     session_dir: str | None = Field(default=None, description="Session directory path")
     archived: bool = Field(default=False, description="Whether the session is archived")
+    owner_id: str | None = Field(default=None, description="User ID of the session owner")
 
 
 class UpdateSessionRequest(BaseModel):

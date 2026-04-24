@@ -1,5 +1,6 @@
 """Kimi Code CLI Web UI application."""
 
+import asyncio
 import os
 import secrets
 import sys
@@ -16,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import MutableHeaders
-from starlette.responses import HTMLResponse
+from starlette.responses import HTMLResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from kimi_cli import logger
@@ -27,6 +28,8 @@ from kimi_cli.utils.server import (
     is_local_host,
 )
 from kimi_cli.web.api import (
+    admin_router,
+    auth_router,
     config_router,
     open_in_router,
     sessions_router,
@@ -151,6 +154,14 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # Initialise user database (creates tables + default admin if needed)
+        from kimi_cli.web.db.database import init_db
+
+        try:
+            await asyncio.to_thread(init_db)
+        except Exception as _e:  # pragma: no cover
+            logger.warning("Failed to initialise user database: {err}", err=_e)
+
         app.state.startup_dir = os.getcwd()
         app.state.session_token = session_token
         app.state.allowed_origins = allowed_origins
@@ -217,6 +228,8 @@ def create_app(
     # CORS middleware for local development
     application.add_middleware(cast(Any, CORSMiddleware), **cors_kwargs)
 
+    application.include_router(auth_router)
+    application.include_router(admin_router)
     application.include_router(config_router)
     application.include_router(sessions_router)
     application.include_router(work_dirs_router)
@@ -236,8 +249,46 @@ def create_app(
         """Health check endpoint."""
         return {"status": "ok"}
 
-    # Mount static files as fallback (must be last)
-    if STATIC_DIR.exists():
+    # SPA catch-all: handles both static assets and client-side routes.
+    #
+    # Why not StaticFiles mount alone:
+    #   @app.get routes always take priority over application.mount() in
+    #   FastAPI/Starlette, so once a catch-all route exists the mount is never
+    #   reached. We therefore serve static files directly here and fall back to
+    #   index.html for any path that isn't a real file (SPA client routes like
+    #   /admin).
+    _index_html = STATIC_DIR / "index.html"
+    if _index_html.exists():
+        from fastapi.responses import FileResponse as _FileResponse
+
+        _spa_html_response = HTMLResponse(
+            content=_index_html.read_text(encoding="utf-8"),
+            headers={"cache-control": "no-cache, no-store, must-revalidate"},
+        )
+
+        # Explicit root route: /{full_path:path} does NOT match "/" in Starlette
+        # because the path converter requires at least one character.
+        @application.get("/", include_in_schema=False)
+        async def spa_root() -> Response:  # pyright: ignore[reportUnusedFunction]
+            return _spa_html_response
+
+        @application.get("/{full_path:path}", include_in_schema=False)
+        async def spa_fallback(full_path: str) -> Response:  # pyright: ignore[reportUnusedFunction]
+            # Serve real static files (JS, CSS, images, etc.) directly.
+            candidate = STATIC_DIR / full_path
+            if candidate.is_file():
+                return _FileResponse(candidate)
+            # Path with an extension that doesn't exist → true 404
+            # (avoids serving index.html with wrong MIME type for missing assets).
+            if "." in full_path.split("/")[-1]:
+                from fastapi import HTTPException
+                raise HTTPException(status_code=404)
+            # No extension → SPA client-side route (e.g. /admin) → index.html
+            return _spa_html_response
+
+    # Mount static files as secondary fallback (reached only when the
+    # catch-all above is absent, i.e. index.html does not exist yet).
+    elif STATIC_DIR.exists():
         application.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 
     return application
