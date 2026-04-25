@@ -56,7 +56,7 @@ type UseSessionsReturn = {
   /** Refresh a single session's data from API */
   refreshSession: (sessionId: string) => Promise<Session | null>;
   /** Create a new session */
-  createSession: (workDir?: string, createDir?: boolean) => Promise<Session>;
+  createSession: (workDir?: string, createDir?: boolean, thinking?: boolean) => Promise<Session>;
   /** Delete a session by ID */
   deleteSession: (sessionId: string) => Promise<boolean>;
   /** Select a session */
@@ -412,20 +412,24 @@ export function useSessions(): UseSessionsReturn {
    * Returns: Session (API type)
    * @param workDir - Optional working directory for the session
    * @param createDir - Whether to auto-create directory if it doesn't exist
+   * @param thinking - Per-session thinking override; undefined = use global config
    */
   const createSession = useCallback(
-    async (workDir?: string, createDir?: boolean): Promise<Session> => {
+    async (workDir?: string, createDir?: boolean, thinking?: boolean): Promise<Session> => {
       setIsLoading(true);
       setError(null);
       try {
         // Use fetch directly to support the work_dir parameter
         const basePath = getApiBaseUrl();
-        const body: { work_dir?: string; create_dir?: boolean } = {};
+        const body: { work_dir?: string; create_dir?: boolean; thinking?: boolean } = {};
         if (workDir) {
           body.work_dir = workDir;
         }
         if (createDir) {
           body.create_dir = createDir;
+        }
+        if (thinking !== undefined) {
+          body.thinking = thinking;
         }
         const response = await fetch(`${basePath}/api/sessions/`, {
           method: "POST",

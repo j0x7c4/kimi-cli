@@ -26,11 +26,17 @@ export interface CreateSessionRequest {
      */
     workDir?: string | null;
     /**
-     * 
+     *
      * @type {boolean}
      * @memberof CreateSessionRequest
      */
     createDir?: boolean;
+    /**
+     * Per-session thinking override; null/undefined = use global config
+     * @type {boolean}
+     * @memberof CreateSessionRequest
+     */
+    thinking?: boolean | null;
 }
 
 /**
@@ -52,6 +58,7 @@ export function CreateSessionRequestFromJSONTyped(json: any, ignoreDiscriminator
         
         'workDir': json['work_dir'] == null ? undefined : json['work_dir'],
         'createDir': json['create_dir'] == null ? undefined : json['create_dir'],
+        'thinking': json['thinking'] == null ? undefined : json['thinking'],
     };
 }
 
@@ -68,6 +75,7 @@ export function CreateSessionRequestToJSONTyped(value?: CreateSessionRequest | n
         
         'work_dir': value['workDir'],
         'create_dir': value['createDir'],
+        'thinking': value['thinking'],
     };
 }
 

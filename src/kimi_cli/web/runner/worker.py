@@ -49,10 +49,24 @@ async def run_worker(session_id: UUID) -> None:
     # vs a brand-new session that should honor config.default_plan_mode.
     resumed = (session.dir / "state.json").exists()
 
+    # Read per-session config (thinking override); None → falls back to global config
+    session_thinking: bool | None = None
+    _cfg_file = session.dir / "session_config.json"
+    if _cfg_file.exists():
+        try:
+            _cfg = json.loads(_cfg_file.read_text(encoding="utf-8"))
+            session_thinking = _cfg.get("thinking")
+        except Exception:
+            pass
+
     # Create KimiCLI instance with MCP configuration
     try:
         kimi_cli = await KimiCLI.create(
-            session, mcp_configs=mcp_configs or None, resumed=resumed, ui_mode="wire"
+            session,
+            mcp_configs=mcp_configs or None,
+            resumed=resumed,
+            ui_mode="wire",
+            thinking=session_thinking,
         )
     except MCPConfigError as exc:
         logger.warning(
@@ -60,7 +74,9 @@ async def run_worker(session_id: UUID) -> None:
             path=default_mcp_file,
             error=exc,
         )
-        kimi_cli = await KimiCLI.create(session, mcp_configs=None, resumed=resumed, ui_mode="wire")
+        kimi_cli = await KimiCLI.create(
+            session, mcp_configs=None, resumed=resumed, ui_mode="wire", thinking=session_thinking
+        )
 
     # Run in wire stdio mode
     await kimi_cli.run_wire_stdio()

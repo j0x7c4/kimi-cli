@@ -32,7 +32,14 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { FolderOpen, Home, Loader2 } from "lucide-react";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { Switch } from "@/components/ui/switch";
+import { ChevronDown, FolderOpen, Home, Loader2 } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 const HOME_DIR_REGEX = /^(\/Users\/[^/]+|\/home\/[^/]+)/;
 const TRAILING_SLASH_REGEX = /\/$/;
@@ -40,7 +47,7 @@ const TRAILING_SLASH_REGEX = /\/$/;
 type CreateSessionDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onConfirm: (workDir: string, createDir?: boolean) => Promise<void>;
+  onConfirm: (workDir: string, createDir?: boolean, thinking?: boolean) => Promise<void>;
   fetchWorkDirs: () => Promise<string[]>;
   fetchStartupDir: () => Promise<string>;
 };
@@ -91,6 +98,8 @@ export function CreateSessionDialog({
   const [pendingPath, setPendingPath] = useState("");
   const [startupDir, setStartupDir] = useState("");
   const [commandValue, setCommandValue] = useState("");
+  const [thinking, setThinking] = useState(true);
+  const [isAdvancedOpen, setIsAdvancedOpen] = useState(false);
   const isCreatingRef = useRef(false);
   const commandListRef = useRef<HTMLDivElement>(null);
 
@@ -144,6 +153,8 @@ export function CreateSessionDialog({
       setPendingPath("");
       setStartupDir("");
       isCreatingRef.current = false;
+      setThinking(true);
+      setIsAdvancedOpen(false);
     }
   }, [open]);
 
@@ -153,7 +164,7 @@ export function CreateSessionDialog({
       isCreatingRef.current = true;
       setIsCreating(true);
       try {
-        await onConfirm(dir);
+        await onConfirm(dir, undefined, thinking);
         onOpenChange(false);
       } catch (err) {
         if (
@@ -169,7 +180,7 @@ export function CreateSessionDialog({
         isCreatingRef.current = false;
       }
     },
-    [onConfirm, onOpenChange],
+    [onConfirm, onOpenChange, thinking],
   );
 
   const handleInputSubmit = useCallback(() => {
@@ -187,7 +198,7 @@ export function CreateSessionDialog({
     setIsCreating(true);
     isCreatingRef.current = true;
     try {
-      await onConfirm(pendingPath, true);
+      await onConfirm(pendingPath, true, thinking);
       onOpenChange(false);
     } catch (err) {
       console.error("Failed to create directory:", err);
@@ -196,7 +207,7 @@ export function CreateSessionDialog({
       isCreatingRef.current = false;
       setPendingPath("");
     }
-  }, [pendingPath, onConfirm, onOpenChange]);
+  }, [pendingPath, onConfirm, onOpenChange, thinking]);
 
   const handleCancelCreateDir = useCallback(() => {
     setShowConfirmCreate(false);
@@ -354,6 +365,24 @@ export function CreateSessionDialog({
               </div>
             )}
           </CommandList>
+          <div className="border-t px-2 py-1.5">
+            <Collapsible open={isAdvancedOpen} onOpenChange={setIsAdvancedOpen}>
+              <CollapsibleTrigger className="flex w-full items-center justify-between rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground">
+                <span>高级设置</span>
+                <ChevronDown className={cn("size-3 transition-transform", isAdvancedOpen && "rotate-180")} />
+              </CollapsibleTrigger>
+              <CollapsibleContent>
+                <div className="flex items-center justify-between px-2 py-2">
+                  <span className="text-xs text-muted-foreground">思考模式</span>
+                  <Switch
+                    checked={thinking}
+                    onCheckedChange={setThinking}
+                    aria-label="开启思考模式"
+                  />
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
+          </div>
         </Command>
       </CommandDialog>
 

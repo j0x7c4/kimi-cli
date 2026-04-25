@@ -268,17 +268,6 @@ export function GlobalConfigControls({
         </ModelSelectorContent>
       </ModelSelector>
 
-      <div className="mx-0 h-4 w-px bg-border/70" />
-      
-      {thinkingTooltip ? (
-        <Tooltip>
-          <TooltipTrigger asChild>{thinkingToggle}</TooltipTrigger>
-          <TooltipContent sideOffset={8}>{thinkingTooltip}</TooltipContent>
-        </Tooltip>
-      ) : (
-        thinkingToggle
-      )}
-
       {onPlanModeChange && (
         <>
           <div className="mx-0 h-4 w-px bg-border/70" />

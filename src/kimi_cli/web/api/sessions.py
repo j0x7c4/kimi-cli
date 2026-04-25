@@ -361,6 +361,13 @@ async def create_session(
     kimi_cli_session = await KimiCLISession.create(work_dir=work_dir)
     context_file = kimi_cli_session.dir / "context.jsonl"
 
+    # Persist per-session config (thinking override)
+    if request is not None and request.thinking is not None:
+        _cfg = {"thinking": request.thinking}
+        (kimi_cli_session.dir / "session_config.json").write_text(
+            json.dumps(_cfg), encoding="utf-8"
+        )
+
     # Persist owner_id so session list filtering works correctly
     from kimi_cli.web.user_auth import get_current_user as _get_current_user
 
@@ -398,6 +405,7 @@ class CreateSessionRequest(BaseModel):
 
     work_dir: str | None = None
     create_dir: bool = False  # Whether to auto-create directory if it doesn't exist
+    thinking: bool | None = None  # Per-session thinking override; None = use global config
 
 
 class ForkSessionRequest(BaseModel):
