@@ -118,7 +118,7 @@ export function GlobalConfigControls({
         return;
       }
       try {
-        const resp = await update({ defaultThinking: checked, restartRunningSessions: false });
+        const resp = await update({ defaultThinking: checked });
         const skippedBusy = resp.skippedBusySessionIds ?? [];
 
         if (skippedBusy.length > 0) {
