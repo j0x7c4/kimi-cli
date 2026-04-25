@@ -257,8 +257,11 @@ def get_config_file() -> Path:
 
 def get_default_config() -> Config:
     """Get the default configuration."""
+    import os
+    default_thinking = os.environ.get("LLM_THINKING", "false").lower() == "true"
     return Config(
         default_model="",
+        default_thinking=default_thinking,
         models={},
         providers={},
         services=Services(),

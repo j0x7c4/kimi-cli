@@ -103,6 +103,11 @@ class ContainerSessionProcess(SessionProcess):
             self._expecting_exit = False
             self._worker_id = str(uuid4())
 
+            # Use worker_id suffix to avoid container name conflicts when
+            # restarting: the old container may still be stopping (--rm is
+            # async) when the new one tries to register the same name.
+            self._container_name = f"kimi-session-{self.session_id}-{self._worker_id[:8]}"
+
             STREAM_LIMIT = 16 * 1024 * 1024
 
             cmd = self._build_docker_cmd()

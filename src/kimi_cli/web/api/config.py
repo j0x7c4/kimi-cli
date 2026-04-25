@@ -170,8 +170,6 @@ def _build_global_config() -> GlobalConfig:
                 config.default_model = models[0].name
 
     default_thinking = config.default_thinking
-    if not config.models and os.environ.get("LLM_THINKING"):
-        default_thinking = os.environ.get("LLM_THINKING", "false").lower() == "true"
 
     return GlobalConfig(
         default_model=config.default_model,
