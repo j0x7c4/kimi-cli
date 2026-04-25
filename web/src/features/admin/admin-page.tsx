@@ -12,6 +12,7 @@ import {
 } from "@/lib/api/apis/AdminApi";
 import type { AdminUser } from "@/lib/api/apis/AdminApi";
 import type { UserInfo } from "@/lib/api/apis/AuthApi";
+import { AdminPluginsPanel } from "./admin-plugins-panel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -41,8 +42,10 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { ArrowLeft, Loader2, Plus, RefreshCw, Trash2, KeyRound, ToggleLeft, ToggleRight } from "lucide-react";
+import { ArrowLeft, Loader2, Plus, RefreshCw, Trash2, KeyRound, ToggleLeft, ToggleRight, Users, Puzzle } from "lucide-react";
 import { toast } from "sonner";
+
+type AdminTab = "users" | "plugins";
 
 type AdminPageProps = {
   currentUser: UserInfo;
@@ -267,6 +270,8 @@ function ResetPasswordDialog({ user, onOpenChange, onUpdated }: ResetPasswordDia
 }
 
 export function AdminPage({ currentUser }: AdminPageProps) {
+  const [activeTab, setActiveTab] = useState<AdminTab>("users");
+
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -336,7 +341,7 @@ export function AdminPage({ currentUser }: AdminPageProps) {
     <div className="min-h-[100dvh] bg-background text-foreground">
       <div className="mx-auto max-w-5xl px-4 py-6">
         {/* Header */}
-        <div className="mb-6 flex items-center gap-4">
+        <div className="mb-4 flex items-center gap-4">
           <Button
             variant="ghost"
             size="sm"
@@ -347,71 +352,109 @@ export function AdminPage({ currentUser }: AdminPageProps) {
             Back
           </Button>
           <h1 className="text-xl font-semibold">Admin Panel</h1>
-          <div className="ml-auto flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={loadUsers}
-              disabled={isLoading}
-              className="gap-2"
-            >
-              <RefreshCw className={isLoading ? "animate-spin size-4" : "size-4"} />
-              Refresh
-            </Button>
-            <Button size="sm" onClick={() => setShowCreateDialog(true)} className="gap-2">
-              <Plus className="size-4" />
-              New User
-            </Button>
-          </div>
+          {activeTab === "users" && (
+            <div className="ml-auto flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={loadUsers}
+                disabled={isLoading}
+                className="gap-2"
+              >
+                <RefreshCw className={isLoading ? "animate-spin size-4" : "size-4"} />
+                Refresh
+              </Button>
+              <Button size="sm" onClick={() => setShowCreateDialog(true)} className="gap-2">
+                <Plus className="size-4" />
+                New User
+              </Button>
+            </div>
+          )}
         </div>
 
-        {/* Stats */}
-        <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-3">
-          <Card>
-            <CardHeader className="pb-1">
-              <CardTitle className="text-sm font-medium text-muted-foreground">
-                Total Users
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p className="text-3xl font-bold">{totalUsers}</p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-1">
-              <CardTitle className="text-sm font-medium text-muted-foreground">
-                Active Users
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p className="text-3xl font-bold text-green-600 dark:text-green-400">
-                {activeUsers}
-              </p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-1">
-              <CardTitle className="text-sm font-medium text-muted-foreground">
-                Inactive Users
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p className="text-3xl font-bold text-muted-foreground">
-                {totalUsers - activeUsers}
-              </p>
-            </CardContent>
-          </Card>
+        {/* Tab nav */}
+        <div className="mb-6 flex gap-1 rounded-lg border bg-muted/40 p-1 w-fit">
+          <button
+            type="button"
+            onClick={() => setActiveTab("users")}
+            className={[
+              "inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+              activeTab === "users"
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground",
+            ].join(" ")}
+          >
+            <Users className="size-3.5" />
+            Users
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("plugins")}
+            className={[
+              "inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+              activeTab === "plugins"
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground",
+            ].join(" ")}
+          >
+            <Puzzle className="size-3.5" />
+            Plugins
+          </button>
         </div>
 
-        {/* Error */}
-        {error && (
-          <div className="mb-4 rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-            {error}
-          </div>
-        )}
+        {/* Plugins tab */}
+        {activeTab === "plugins" && <AdminPluginsPanel />}
 
-        {/* Users table */}
-        <div className="rounded-xl border bg-card shadow-sm overflow-hidden">
+        {/* Users tab */}
+        {activeTab === "users" && (
+          <div className="flex flex-col gap-6">
+            {/* Stats */}
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+              <Card>
+                <CardHeader className="pb-1">
+                  <CardTitle className="text-sm font-medium text-muted-foreground">
+                    Total Users
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <p className="text-3xl font-bold">{totalUsers}</p>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader className="pb-1">
+                  <CardTitle className="text-sm font-medium text-muted-foreground">
+                    Active Users
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <p className="text-3xl font-bold text-green-600 dark:text-green-400">
+                    {activeUsers}
+                  </p>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader className="pb-1">
+                  <CardTitle className="text-sm font-medium text-muted-foreground">
+                    Inactive Users
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <p className="text-3xl font-bold text-muted-foreground">
+                    {totalUsers - activeUsers}
+                  </p>
+                </CardContent>
+              </Card>
+            </div>
+
+            {/* Error */}
+            {error && (
+              <div className="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+                {error}
+              </div>
+            )}
+
+            {/* Users table */}
+            <div className="rounded-xl border bg-card shadow-sm overflow-hidden">
           {isLoading && users.length === 0 ? (
             <div className="flex items-center justify-center py-16 text-muted-foreground gap-2">
               <Loader2 className="animate-spin size-4" />
@@ -523,7 +566,9 @@ export function AdminPage({ currentUser }: AdminPageProps) {
               </table>
             </div>
           )}
-        </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Create user dialog */}
