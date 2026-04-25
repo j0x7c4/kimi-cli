@@ -499,14 +499,13 @@ async def get_session_upload_file(
 
 
 async def _get_file_from_container(
-    session_id: UUID,
+    container_name: str,
     path: str,
     work_dir: Path,
     restrict_sensitive_apis: bool,
     max_path_depth: int,
 ) -> Response:
     """Read a file or list a directory from a running session container."""
-    container_name = f"kimi-session-{session_id}"
 
     # Verify the container is running before attempting to read from it
     check_proc = await asyncio.create_subprocess_exec(
@@ -711,7 +710,7 @@ async def get_session_file(
                 or DEFAULT_MAX_PUBLIC_PATH_DEPTH
             )
             return await _get_file_from_container(
-                session_id,
+                session_process.container_name,
                 path,
                 work_dir,
                 restrict_sensitive_apis,

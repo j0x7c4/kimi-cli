@@ -85,6 +85,11 @@ class ContainerSessionProcess(SessionProcess):
         self._extra_env = extra_env or {}
         self._container_name = f"kimi-session-{session_id}"
 
+    @property
+    def container_name(self) -> str:
+        """Current container name (updated on each start)."""
+        return self._container_name
+
     async def start(
         self,
         *,
