@@ -33,6 +33,7 @@ from kimi_cli.ui.shell.console import console
 from kimi_cli.ui.shell.echo import render_user_echo_text
 from kimi_cli.ui.shell.mcp_status import render_mcp_prompt
 from kimi_cli.ui.shell.prompt import (
+    BgTaskCounts,
     CustomPromptSession,
     CwdLostError,
     PromptMode,
@@ -416,26 +417,28 @@ class Shell:
         @dataclass
         class _BgCountCache:
             time: float = 0.0
-            count: int = 0
+            counts: BgTaskCounts = BgTaskCounts()
 
         _bg_cache = _BgCountCache()
 
-        def _bg_task_count() -> int:
+        def _bg_task_counts() -> BgTaskCounts:
             if not isinstance(self.soul, KimiSoul):
-                return 0
+                return BgTaskCounts()
             now = time.monotonic()
             if now - _bg_cache.time < 1.0:
-                return _bg_cache.count
+                return _bg_cache.counts
             views = list_task_views(self.soul.runtime.background_tasks, active_only=True)
-            _bg_cache.count = sum(1 for v in views if v.spec.kind == "bash")
+            bash_n = sum(1 for v in views if v.spec.kind == "bash")
+            agent_n = sum(1 for v in views if v.spec.kind == "agent")
+            _bg_cache.counts = BgTaskCounts(bash=bash_n, agent=agent_n)
             _bg_cache.time = now
-            return _bg_cache.count
+            return _bg_cache.counts
 
         with CustomPromptSession(
             status_provider=lambda: self.soul.status,
             status_block_provider=_mcp_status_block,
             fast_refresh_provider=_mcp_status_loading,
-            background_task_count_provider=_bg_task_count,
+            background_task_count_provider=_bg_task_counts,
             model_capabilities=self.soul.model_capabilities or set(),
             model_name=model_display_name(
                 self.soul.model_name,
@@ -1340,6 +1343,12 @@ class Shell:
                     continue
                 self._forward_approval_to_sink(request)
 
+    def _get_default_buffer_text_and_cursor(self) -> tuple[str, int]:
+        if self._prompt_session is None:
+            return "", 0
+        buf = self._prompt_session._session.default_buffer  # pyright: ignore[reportPrivateUsage]
+        return buf.text, buf.cursor_position
+
     def _activate_prompt_approval_modal(self) -> None:
         if self._prompt_session is None:
             return
@@ -1356,11 +1365,7 @@ class Shell:
             self._approval_modal = ApprovalPromptDelegate(
                 current_request,
                 on_response=self._handle_prompt_approval_response,
-                buffer_text_provider=(
-                    lambda: self._prompt_session._session.default_buffer.text  # pyright: ignore[reportPrivateUsage]
-                    if self._prompt_session is not None
-                    else ""
-                ),
+                buffer_state_provider=self._get_default_buffer_text_and_cursor,
                 text_expander=self._prompt_session._get_placeholder_manager().serialize_for_history,  # pyright: ignore[reportPrivateUsage]
             )
             self._prompt_session.attach_modal(self._approval_modal)
