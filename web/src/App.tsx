@@ -19,6 +19,7 @@ import { consumeAuthTokenFromUrl, setAuthToken } from "./lib/auth";
 import { useAuth } from "./hooks/useAuth";
 import { LoginPage } from "./features/auth/login-page";
 import { AdminPage } from "./features/admin/admin-page";
+import { BrandingProvider, useBranding } from "./hooks/useBranding";
 
 /**
  * Get session ID from URL search params
@@ -49,6 +50,11 @@ const SIDEBAR_ANIMATION_MS = 250;
 function App() {
   // Initialize theme on app startup
   useTheme();
+
+  // Branding context
+  const { config: brandingConfig } = useBranding();
+  const collapsedLogoSrc = brandingConfig?.logo ?? "/logo.png";
+  const collapsedLogoUrl = brandingConfig?.logo_url ?? "https://www.kimi.com/code";
 
   // Auth state
   const { currentUser, isLoading: isAuthLoading, isAdmin, login, logout } = useAuth();
@@ -467,14 +473,14 @@ function App() {
                   )}
                 >
                   <a
-                    href="https://www.kimi.com/code"
+                    href={collapsedLogoUrl}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="hover:opacity-80 transition-opacity"
                   >
                     <img
-                      src="/logo.png"
-                      alt="Kimi"
+                      src={collapsedLogoSrc}
+                      alt="Logo"
                       width={24}
                       height={24}
                       className="size-6"
@@ -666,4 +672,12 @@ function App() {
   );
 }
 
-export default App;
+function AppWithBranding() {
+  return (
+    <BrandingProvider>
+      <App />
+    </BrandingProvider>
+  );
+}
+
+export default AppWithBranding;

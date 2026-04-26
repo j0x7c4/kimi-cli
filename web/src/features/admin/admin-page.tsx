@@ -13,6 +13,7 @@ import {
 import type { AdminUser } from "@/lib/api/apis/AdminApi";
 import type { UserInfo } from "@/lib/api/apis/AuthApi";
 import { AdminPluginsPanel } from "./admin-plugins-panel";
+import { AdminBrandingPanel } from "./admin-branding-panel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -42,10 +43,10 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { ArrowLeft, Loader2, Plus, RefreshCw, Trash2, KeyRound, ToggleLeft, ToggleRight, Users, Puzzle } from "lucide-react";
+import { ArrowLeft, Loader2, Plus, RefreshCw, Trash2, KeyRound, ToggleLeft, ToggleRight, Users, Puzzle, Palette } from "lucide-react";
 import { toast } from "sonner";
 
-type AdminTab = "users" | "plugins";
+type AdminTab = "users" | "plugins" | "branding";
 
 type AdminPageProps = {
   currentUser: UserInfo;
@@ -338,7 +339,7 @@ export function AdminPage({ currentUser }: AdminPageProps) {
   const activeUsers = users.filter((u) => u.is_active).length;
 
   return (
-    <div className="min-h-[100dvh] bg-background text-foreground">
+    <div className="min-h-[100dvh] bg-background text-foreground overflow-y-auto">
       <div className="mx-auto max-w-5xl px-4 py-6">
         {/* Header */}
         <div className="mb-4 flex items-center gap-4">
@@ -400,10 +401,26 @@ export function AdminPage({ currentUser }: AdminPageProps) {
             <Puzzle className="size-3.5" />
             Plugins
           </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("branding")}
+            className={[
+              "inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+              activeTab === "branding"
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground",
+            ].join(" ")}
+          >
+            <Palette className="size-3.5" />
+            Branding
+          </button>
         </div>
 
         {/* Plugins tab */}
         {activeTab === "plugins" && <AdminPluginsPanel />}
+
+        {/* Branding tab */}
+        {activeTab === "branding" && <AdminBrandingPanel />}
 
         {/* Users tab */}
         {activeTab === "users" && (

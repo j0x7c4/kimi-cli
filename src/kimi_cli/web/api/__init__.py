@@ -1,7 +1,7 @@
 """API routes."""
 
 from kimi_cli.web.api import admin as admin_module
-from kimi_cli.web.api import auth_user, config, open_in, sessions
+from kimi_cli.web.api import auth_user, branding as branding_module, config, open_in, sessions
 
 config_router = config.router
 sessions_router = sessions.router
@@ -9,10 +9,14 @@ work_dirs_router = sessions.work_dirs_router
 open_in_router = open_in.router
 auth_router = auth_user.router
 admin_router = admin_module.router
+branding_public_router = branding_module.public_router
+branding_admin_router = branding_module.admin_router
 
 __all__ = [
     "admin_router",
     "auth_router",
+    "branding_admin_router",
+    "branding_public_router",
     "config_router",
     "open_in_router",
     "sessions_router",

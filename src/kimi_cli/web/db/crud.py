@@ -196,16 +196,61 @@ def delete_user_session(db: sqlite3.Connection, token: str) -> None:
     db.commit()
 
 
+# ---------------------------------------------------------------------------
+# Branding CRUD
+# ---------------------------------------------------------------------------
+
+# All valid branding keys
+BRANDING_KEYS = {"brand_name", "version", "page_title", "logo_url", "logo", "favicon"}
+
+
+def get_branding(db: sqlite3.Connection) -> dict[str, str | None]:
+    """Return all branding settings. Unset keys map to ``None``."""
+    rows = db.execute("SELECT key, value FROM branding").fetchall()
+    result: dict[str, str | None] = {k: None for k in BRANDING_KEYS}
+    for row in rows:
+        k = row["key"]
+        if k in BRANDING_KEYS:
+            result[k] = row["value"]
+    return result
+
+
+def upsert_branding(db: sqlite3.Connection, settings: dict[str, str | None]) -> None:
+    """Batch-update branding settings. A ``None`` value deletes the key."""
+    for key, value in settings.items():
+        if key not in BRANDING_KEYS:
+            continue
+        if value is None or value == "":
+            db.execute("DELETE FROM branding WHERE key = ?", (key,))
+        else:
+            db.execute(
+                "INSERT INTO branding (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+    db.commit()
+
+
+def delete_all_branding(db: sqlite3.Connection) -> None:
+    """Delete all branding settings, restoring defaults."""
+    db.execute("DELETE FROM branding")
+    db.commit()
+
+
 __all__ = [
+    "BRANDING_KEYS",
     "create_user",
     "create_user_session",
+    "delete_all_branding",
     "delete_user",
     "delete_user_session",
+    "get_branding",
     "get_user_by_id",
     "get_user_by_username",
     "get_user_session",
     "hash_password",
     "list_users",
     "update_user",
+    "upsert_branding",
     "verify_password",
 ]

@@ -69,6 +69,13 @@ CREATE TABLE IF NOT EXISTS user_sessions (
 );
 """
 
+_CREATE_BRANDING_TABLE = """
+CREATE TABLE IF NOT EXISTS branding (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"""
+
 
 def get_db() -> sqlite3.Connection:
     """Return a SQLite connection to the users database.
@@ -94,6 +101,7 @@ def init_db() -> None:
     with get_db() as conn:
         conn.execute(_CREATE_USERS_TABLE)
         conn.execute(_CREATE_USER_SESSIONS_TABLE)
+        conn.execute(_CREATE_BRANDING_TABLE)
         conn.commit()
 
         # Create default admin only when table is empty

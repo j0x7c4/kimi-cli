@@ -30,6 +30,8 @@ from kimi_cli.utils.server import (
 from kimi_cli.web.api import (
     admin_router,
     auth_router,
+    branding_admin_router,
+    branding_public_router,
     config_router,
     open_in_router,
     sessions_router,
@@ -230,6 +232,8 @@ def create_app(
 
     application.include_router(auth_router)
     application.include_router(admin_router)
+    application.include_router(branding_public_router)
+    application.include_router(branding_admin_router)
     application.include_router(config_router)
     application.include_router(sessions_router)
     application.include_router(work_dirs_router)

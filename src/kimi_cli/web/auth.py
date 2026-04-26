@@ -161,6 +161,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # Auth endpoints are always public (handle their own authentication)
         if path.startswith("/api/auth/"):
             return await call_next(request)
+        # Public branding endpoint (needed on login page before authentication)
+        if path.startswith("/api/branding"):
+            return await call_next(request)
 
         if self._enforce_origin:
             origin = request.headers.get("origin")
