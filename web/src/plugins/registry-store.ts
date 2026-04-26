@@ -96,11 +96,19 @@ const BUILTINS: BuiltinPluginDef[] = [
     events: ["thinking:start", "thinking:end"],
   },
   {
+    id: "builtin:subagent-animation",
+    name: "Subagent Animation",
+    description: "Shows an animated indicator when a sub-agent is spawned.",
+    version: "1.0.0",
+    author: "kimi-cli",
+    events: ["subagent:start", "subagent:stop"],
+  },
+  {
     id: "builtin:subagent-cluster",
     name: "Subagent Cluster Visualization",
     description:
-      "Displays an animated panel when multiple sub-agents are launched concurrently.",
-    version: "1.0.0",
+      "Displays an orbital animation when multiple sub-agents are launched concurrently.",
+    version: "2.0.0",
     author: "kimi-cli",
     events: ["subagent:cluster"],
   },

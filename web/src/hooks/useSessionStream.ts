@@ -190,6 +190,8 @@ type UseSessionStreamOptions = {
   onSessionStatus?: (status: SessionStatus) => void;
   /** Callback when first turn is complete (for auto-renaming) */
   onFirstTurnComplete?: () => void;
+  /** Callback to broadcast wire events to the plugin system */
+  onWireEventForPlugin?: (event: import("./wireTypes").WireEvent, ctx: { sessionId: string; isReplay: boolean }) => void;
 };
 
 type UseSessionStreamReturn = {
@@ -276,6 +278,7 @@ export function useSessionStream(
     onError,
     onSessionStatus,
     onFirstTurnComplete,
+    onWireEventForPlugin,
   } = options;
 
   const [messages, setMessagesInternal] = useState<LiveMessage[]>([]);
@@ -334,6 +337,10 @@ export function useSessionStream(
   const initializeIdRef = useRef<string | null>(null);
   const initializeRetryCountRef = useRef(0); // Track retry attempts for initialize
   const MAX_INITIALIZE_RETRIES = 5; // Maximum retry attempts
+
+  // Plugin bridge ref — avoids stale closure in WebSocket handler chain
+  const pluginBridgeRef = useRef(onWireEventForPlugin);
+  pluginBridgeRef.current = onWireEventForPlugin;
   const usingCachedCommandsRef = useRef(false); // Track if using cached slash commands
   const slashCommandsLenRef = useRef(0); // Track slashCommands length without state dependency
 
@@ -1953,6 +1960,12 @@ export function useSessionStream(
         default:
           break;
       }
+
+      // Broadcast to plugin system (side-channel, does not affect main logic)
+      // Uses ref to avoid stale closure — WebSocket handler chain captures processEvent once
+      if (sessionId) {
+        pluginBridgeRef.current?.(event, { sessionId, isReplay });
+      }
     },
     [
       getNextMessageId,
@@ -1965,6 +1978,7 @@ export function useSessionStream(
       updateMessageById,
       setAwaitingFirstResponse,
       processSubagentEvent,
+      sessionId,
     ],
   );
 

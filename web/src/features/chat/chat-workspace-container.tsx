@@ -24,6 +24,11 @@ import type { SessionFileEntry } from "@/hooks/useSessions";
 import { getApiBaseUrl, isMacOS } from "@/hooks/utils";
 import { useSessionStream } from "@/hooks/useSessionStream";
 import { useToolEventsStore } from "@/features/tool/store";
+import { usePluginEventEmitter, usePluginRegistry } from "@/plugins";
+import { getInstalledPlugins, seedBuiltins } from "@/plugins/registry-store";
+import ThinkingAnimationPlugin from "@/plugins/builtins/ThinkingAnimationPlugin";
+import SubagentAnimationPlugin from "@/plugins/builtins/SubagentAnimationPlugin";
+import SubagentClusterPlugin from "@/plugins/builtins/SubagentClusterPlugin";
 import { useQueueStore } from "./queue-store";
 import { ChatWorkspace } from "./chat";
 
@@ -85,6 +90,34 @@ export function ChatWorkspaceContainer({
     return model?.maxContextSize;
   }, [config]);
 
+  // Plugin system: event emitter + registration
+  const { translateWireEvent } = usePluginEventEmitter();
+  const pluginRegistry = usePluginRegistry();
+
+  useEffect(() => {
+    seedBuiltins();
+    const installed = getInstalledPlugins();
+
+    const builtinMap: Record<string, import("@/plugins").UIPlugin> = {
+      "builtin:thinking-animation": ThinkingAnimationPlugin,
+      "builtin:subagent-animation": SubagentAnimationPlugin,
+      "builtin:subagent-cluster": SubagentClusterPlugin,
+    };
+
+    const unregisters: (() => void)[] = [];
+    for (const entry of installed) {
+      if (!entry.enabled) continue;
+      const builtin = builtinMap[entry.id];
+      if (builtin) {
+        unregisters.push(pluginRegistry.register(builtin));
+      }
+      // URL-based plugins are loaded asynchronously via importPluginFromUrl
+      // and registered separately (admin panel handles this)
+    }
+
+    return () => unregisters.forEach((u) => u());
+  }, [pluginRegistry]);
+
   const handleStreamError = useCallback((error: Error) => {
     toast.error("Connection Error", {
       description: error.message,
@@ -107,6 +140,7 @@ export function ChatWorkspaceContainer({
     onError: handleStreamError,
     onSessionStatus,
     onFirstTurnComplete: handleFirstTurnComplete,
+    onWireEventForPlugin: translateWireEvent,
   });
 
   const {
