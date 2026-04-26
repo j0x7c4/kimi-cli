@@ -49,6 +49,7 @@ def _get_db_path() -> Path:
     share_dir = _get_share_dir()
     return share_dir / "users.db"
 
+
 _CREATE_USERS_TABLE = """
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,

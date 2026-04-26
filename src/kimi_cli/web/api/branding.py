@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 import re
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, field_validator
@@ -37,9 +37,7 @@ def _check_data_url_size(data_url: str, *, max_kb: int, field: str) -> None:
         b64_part = data_url.split(",", 1)[1]
         raw = base64.b64decode(b64_part)
         if len(raw) > max_kb * 1024:
-            raise ValueError(
-                f"{field} decoded size exceeds {max_kb} KB"
-            )
+            raise ValueError(f"{field} decoded size exceeds {max_kb} KB")
     except (IndexError, Exception) as e:
         if "exceeds" in str(e):
             raise
@@ -54,12 +52,12 @@ def _check_data_url_size(data_url: str, *, max_kb: int, field: str) -> None:
 class BrandingResponse(BaseModel):
     """Response model shared by public and admin branding endpoints."""
 
-    brand_name: Optional[str] = None
-    version: Optional[str] = None
-    page_title: Optional[str] = None
-    logo_url: Optional[str] = None
-    logo: Optional[str] = None
-    favicon: Optional[str] = None
+    brand_name: str | None = None
+    version: str | None = None
+    page_title: str | None = None
+    logo_url: str | None = None
+    logo: str | None = None
+    favicon: str | None = None
 
 
 class UpdateBrandingRequest(BaseModel):
@@ -68,44 +66,44 @@ class UpdateBrandingRequest(BaseModel):
     Each field is optional; passing ``null`` clears the setting.
     """
 
-    brand_name: Optional[str] = None
-    version: Optional[str] = None
-    page_title: Optional[str] = None
-    logo_url: Optional[str] = None
-    logo: Optional[str] = None
-    favicon: Optional[str] = None
+    brand_name: str | None = None
+    version: str | None = None
+    page_title: str | None = None
+    logo_url: str | None = None
+    logo: str | None = None
+    favicon: str | None = None
 
     @field_validator("brand_name")
     @classmethod
-    def validate_brand_name(cls, v: Optional[str]) -> Optional[str]:
+    def validate_brand_name(cls, v: str | None) -> str | None:
         if v is not None and len(v) > 30:
             raise ValueError("brand_name must be <= 30 characters")
         return v
 
     @field_validator("version")
     @classmethod
-    def validate_version(cls, v: Optional[str]) -> Optional[str]:
+    def validate_version(cls, v: str | None) -> str | None:
         if v is not None and len(v) > 20:
             raise ValueError("version must be <= 20 characters")
         return v
 
     @field_validator("page_title")
     @classmethod
-    def validate_page_title(cls, v: Optional[str]) -> Optional[str]:
+    def validate_page_title(cls, v: str | None) -> str | None:
         if v is not None and len(v) > 60:
             raise ValueError("page_title must be <= 60 characters")
         return v
 
     @field_validator("logo_url")
     @classmethod
-    def validate_logo_url(cls, v: Optional[str]) -> Optional[str]:
+    def validate_logo_url(cls, v: str | None) -> str | None:
         if v is not None and not v.startswith(("http://", "https://")):
             raise ValueError("logo_url must start with http:// or https://")
         return v
 
     @field_validator("logo")
     @classmethod
-    def validate_logo(cls, v: Optional[str]) -> Optional[str]:
+    def validate_logo(cls, v: str | None) -> str | None:
         if v is not None:
             if not _LOGO_MIME_PATTERN.match(v):
                 raise ValueError("logo must be a valid Data URL (PNG/SVG/JPEG)")
@@ -114,7 +112,7 @@ class UpdateBrandingRequest(BaseModel):
 
     @field_validator("favicon")
     @classmethod
-    def validate_favicon(cls, v: Optional[str]) -> Optional[str]:
+    def validate_favicon(cls, v: str | None) -> str | None:
         if v is not None:
             if not _FAVICON_MIME_PATTERN.match(v):
                 raise ValueError("favicon must be a valid Data URL (ICO/PNG/SVG)")

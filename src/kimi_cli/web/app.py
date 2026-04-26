@@ -286,6 +286,7 @@ def create_app(
             # (avoids serving index.html with wrong MIME type for missing assets).
             if "." in full_path.split("/")[-1]:
                 from fastapi import HTTPException
+
                 raise HTTPException(status_code=404)
             # No extension → SPA client-side route (e.g. /admin) → index.html
             return _spa_html_response

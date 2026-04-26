@@ -56,9 +56,7 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 def get_user_by_username(db: sqlite3.Connection, username: str) -> dict[str, Any] | None:
     """Return user dict for *username*, or ``None`` if not found."""
-    row = db.execute(
-        "SELECT * FROM users WHERE username = ?", (username,)
-    ).fetchone()
+    row = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     return _row_to_dict(row)
 
 
@@ -171,9 +169,7 @@ def create_user_session(
 
 def get_user_session(db: sqlite3.Connection, token: str) -> dict[str, Any] | None:
     """Return the user dict associated with *token*, or ``None`` if expired/missing."""
-    row = db.execute(
-        "SELECT * FROM user_sessions WHERE token = ?", (token,)
-    ).fetchone()
+    row = db.execute("SELECT * FROM user_sessions WHERE token = ?", (token,)).fetchone()
     if row is None:
         return None
 

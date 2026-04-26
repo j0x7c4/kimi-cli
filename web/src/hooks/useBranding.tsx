@@ -27,6 +27,7 @@ export type BrandingState = {
 const BrandingContext = createContext<BrandingState>({
   config: null,
   isLoading: true,
+  // biome-ignore lint/suspicious/noEmptyBlockStatements: context default
   refresh: async () => {},
 });
 
