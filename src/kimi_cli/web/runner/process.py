@@ -513,9 +513,12 @@ class SessionProcess:
                     # Skip files that fail to decode - don't block the upload
                     pass
 
-        # Mark files as sent
+        # Mark files as sent and persist to disk so state survives server restarts.
         for file in files:
             self._sent_files.add(file.name)
+        sent_marker = uploads_dir / ".sent"
+        with contextlib.suppress(Exception):
+            sent_marker.write_text(json.dumps(sorted(self._sent_files)), encoding="utf-8")
 
     async def _handle_in_message(self, message: JSONRPCInMessage) -> str | None:
         """Handle inbound message to worker, encoding uploaded files."""
