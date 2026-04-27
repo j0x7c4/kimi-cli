@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -63,6 +64,8 @@ class BuiltinSystemPromptArgs:
     """The operating system kind, e.g. 'Windows', 'macOS', 'Linux'."""
     KIMI_SHELL: str
     """The shell executable used by the Shell tool, e.g. 'bash (`/bin/bash`)'."""
+    KIMI_OUTPUT_DIR: str
+    """The directory where the agent must save all output and intermediate files."""
 
 
 _AGENTS_MD_MAX_BYTES = 32 * 1024  # 32 KiB
@@ -302,6 +305,7 @@ class Runtime:
                 KIMI_ADDITIONAL_DIRS_INFO=additional_dirs_info,
                 KIMI_OS=environment.os_kind,
                 KIMI_SHELL=f"{environment.shell_name} (`{environment.shell_path}`)",
+                KIMI_OUTPUT_DIR=os.environ.get("KIMI_OUTPUT_DIR", "/app/output"),
             ),
             denwa_renji=DenwaRenji(),
             approval=Approval(state=approval_state),

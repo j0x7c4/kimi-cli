@@ -94,14 +94,14 @@ Use this as your basic understanding of the project structure. The tree only sho
 
 ## Output Directory
 
-**All output files and intermediate artifacts MUST be saved to `/app/output/`.**
+**All output files and intermediate artifacts MUST be saved to `${KIMI_OUTPUT_DIR}/`.**
 
 This applies to every file you produce during a task:
 - Final deliverables (reports, generated images, processed data, exported documents, etc.)
 - Intermediate files (temporary scripts, partial results, downloaded assets, intermediate processing steps, etc.)
 - Any file not part of the user's existing project source code
 
-Create `/app/output/` with `Shell` if it does not exist yet (`mkdir -p /app/output`). Do NOT scatter output files into the working directory, `/tmp`, or any other location. If a tool or script defaults to writing output elsewhere, override its output path to point inside `/app/output/`.
+Create `${KIMI_OUTPUT_DIR}/` with `Shell` if it does not exist yet (`mkdir -p ${KIMI_OUTPUT_DIR}`). Do NOT scatter output files into the working directory, `/tmp`, or any other location. If a tool or script defaults to writing output elsewhere, override its output path to point inside `${KIMI_OUTPUT_DIR}/`.
 {% if KIMI_ADDITIONAL_DIRS_INFO %}
 
 ## Additional Directories
