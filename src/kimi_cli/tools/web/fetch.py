@@ -84,9 +84,7 @@ class FetchURL(CallableTool2[Params]):
                     )
                     # Fallback to Playwright for 403 (bot detection)
                     if response.status == 403:
-                        logger.info(
-                            "FetchURL falling back to Playwright for {url}", url=params.url
-                        )
+                        logger.info("FetchURL falling back to Playwright for {url}", url=params.url)
                         return await FetchURL._fetch_with_playwright(params)
                     return builder.error(
                         (
@@ -219,9 +217,7 @@ class FetchURL(CallableTool2[Params]):
             )
 
         builder.write(extracted_text)
-        return builder.ok(
-            "The returned content was fetched via browser automation."
-        )
+        return builder.ok("The returned content was fetched via browser automation.")
 
     async def _fetch_with_service(self, params: Params) -> ToolReturnValue:
         assert self._service_config is not None
