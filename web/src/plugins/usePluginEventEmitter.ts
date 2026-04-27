@@ -29,8 +29,10 @@ export function usePluginEventEmitter() {
   const thinkingRef = useRef<ThinkingState | null>(null);
   // Track active subagents for cluster detection (from SubagentEvent wire events)
   const activeSubagentsRef = useRef<Map<string, { agentType: string | null; parentToolCallId: string }>>(new Map());
-  // Track agent ToolCall events for cluster detection (covers background agents)
+  // Track agent ToolCall events for subagent:stop cleanup
   const pendingAgentToolCallsRef = useRef<Map<string, { toolCallId: string; agentType: string | null }>>(new Map());
+  // Accumulates agents for cluster detection; NOT cleared by ToolResult, only by timer or TurnBegin
+  const clusterWindowAgentsRef = useRef<Map<string, { agentId: string; agentType: string | null }>>(new Map());
   const clusterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const clusterCounterRef = useRef(0);
 
@@ -81,6 +83,8 @@ export function usePluginEventEmitter() {
             }
             const toolCallId = tc.payload.id;
             pendingAgentToolCallsRef.current.set(toolCallId, { toolCallId, agentType });
+            // Add to cluster window — kept until timer fires or TurnBegin (not cleared by ToolResult)
+            clusterWindowAgentsRef.current.set(toolCallId, { agentId: toolCallId, agentType });
 
             emit({
               type: "subagent:start",
@@ -96,14 +100,9 @@ export function usePluginEventEmitter() {
               clearTimeout(clusterTimerRef.current);
             }
             clusterTimerRef.current = setTimeout(() => {
-              const pending = pendingAgentToolCallsRef.current;
-              const active = activeSubagentsRef.current;
-              // Merge both sources for cluster count
-              const allAgents = new Map<string, { agentId: string; agentType: string | null }>();
-              for (const [id, info] of active) {
-                allAgents.set(id, { agentId: id, agentType: info.agentType });
-              }
-              for (const [id, info] of pending) {
+              // Merge cluster window (ToolCall-based) with active subagents (SubagentEvent-based)
+              const allAgents = new Map(clusterWindowAgentsRef.current);
+              for (const [id, info] of activeSubagentsRef.current) {
                 if (!allAgents.has(id)) {
                   allAgents.set(id, { agentId: id, agentType: info.agentType });
                 }
@@ -117,6 +116,7 @@ export function usePluginEventEmitter() {
                   agents: Array.from(allAgents.values()),
                 });
               }
+              clusterWindowAgentsRef.current.clear();
               clusterTimerRef.current = null;
             }, 500);
           }
@@ -225,6 +225,11 @@ export function usePluginEventEmitter() {
         case "TurnBegin": {
           activeSubagentsRef.current.clear();
           pendingAgentToolCallsRef.current.clear();
+          clusterWindowAgentsRef.current.clear();
+          if (clusterTimerRef.current) {
+            clearTimeout(clusterTimerRef.current);
+            clusterTimerRef.current = null;
+          }
           emit({ type: "turn:begin", sessionId, turnIndex: 0 });
           break;
         }
@@ -232,6 +237,7 @@ export function usePluginEventEmitter() {
         case "StepInterrupted": {
           activeSubagentsRef.current.clear();
           pendingAgentToolCallsRef.current.clear();
+          clusterWindowAgentsRef.current.clear();
           emit({ type: "turn:end", sessionId });
           break;
         }
