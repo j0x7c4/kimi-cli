@@ -31,10 +31,13 @@ export function usePluginEventEmitter() {
   const activeSubagentsRef = useRef<Map<string, { agentType: string | null; parentToolCallId: string }>>(new Map());
   // Track agent ToolCall events for subagent:stop cleanup
   const pendingAgentToolCallsRef = useRef<Map<string, { toolCallId: string; agentType: string | null }>>(new Map());
-  // Accumulates agents for cluster detection; NOT cleared by ToolResult, only by timer or TurnBegin
+  // Accumulates ALL agents seen in the current turn (ToolCall + SubagentEvent paths)
+  // NOT cleared by ToolResult, only by TurnBegin/StepInterrupted or after cluster fires
   const clusterWindowAgentsRef = useRef<Map<string, { agentId: string; agentType: string | null }>>(new Map());
   const clusterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const clusterCounterRef = useRef(0);
+  // Prevents emitting duplicate cluster events within the same turn
+  const clusterEmittedRef = useRef(false);
 
   const emit = useCallback(
     (event: PluginEvent) => {
@@ -83,7 +86,8 @@ export function usePluginEventEmitter() {
             }
             const toolCallId = tc.payload.id;
             pendingAgentToolCallsRef.current.set(toolCallId, { toolCallId, agentType });
-            // Add to cluster window — kept until timer fires or TurnBegin (not cleared by ToolResult)
+            // Add to cluster window — persists for the whole turn so sequential
+            // background agents (launched in separate LLM steps) are counted
             clusterWindowAgentsRef.current.set(toolCallId, { agentId: toolCallId, agentType });
 
             emit({
@@ -94,31 +98,33 @@ export function usePluginEventEmitter() {
               parentToolCallId: toolCallId,
             });
 
-            // Cluster detection: debounce — if multiple Agent tool calls arrive
-            // within a short window, emit a cluster event
-            if (clusterTimerRef.current) {
-              clearTimeout(clusterTimerRef.current);
-            }
-            clusterTimerRef.current = setTimeout(() => {
-              // Merge cluster window (ToolCall-based) with active subagents (SubagentEvent-based)
-              const allAgents = new Map(clusterWindowAgentsRef.current);
-              for (const [id, info] of activeSubagentsRef.current) {
-                if (!allAgents.has(id)) {
-                  allAgents.set(id, { agentId: id, agentType: info.agentType });
+            // Cluster detection: fire as soon as the 2nd agent is seen.
+            // Use a short debounce (150ms) to batch agents launched in parallel
+            // (same LLM step). Sequential agents (different steps) also accumulate
+            // in clusterWindowAgentsRef and trigger on the 2nd one.
+            if (clusterWindowAgentsRef.current.size >= 2 && !clusterEmittedRef.current) {
+              if (clusterTimerRef.current) clearTimeout(clusterTimerRef.current);
+              clusterTimerRef.current = setTimeout(() => {
+                if (clusterEmittedRef.current) { clusterTimerRef.current = null; return; }
+                const allAgents = new Map(clusterWindowAgentsRef.current);
+                for (const [id, info] of activeSubagentsRef.current) {
+                  if (!allAgents.has(id)) {
+                    allAgents.set(id, { agentId: id, agentType: info.agentType });
+                  }
                 }
-              }
-              if (allAgents.size >= 2) {
-                emit({
-                  type: "subagent:cluster",
-                  sessionId,
-                  clusterId: `cluster_${++clusterCounterRef.current}`,
-                  agentCount: allAgents.size,
-                  agents: Array.from(allAgents.values()),
-                });
-              }
-              clusterWindowAgentsRef.current.clear();
-              clusterTimerRef.current = null;
-            }, 500);
+                if (allAgents.size >= 2) {
+                  clusterEmittedRef.current = true;
+                  emit({
+                    type: "subagent:cluster",
+                    sessionId,
+                    clusterId: `cluster_${++clusterCounterRef.current}`,
+                    agentCount: allAgents.size,
+                    agents: Array.from(allAgents.values()),
+                  });
+                }
+                clusterTimerRef.current = null;
+              }, 150);
+            }
           }
           break;
         }
@@ -175,39 +181,43 @@ export function usePluginEventEmitter() {
           const innerType = sub.payload.event?.type;
 
           if (innerType === "TurnBegin") {
-            activeSubagentsRef.current.set(agentId, {
-              agentType: sub.payload.subagent_type ?? null,
-              parentToolCallId,
-            });
+            const agentType = sub.payload.subagent_type ?? null;
+            activeSubagentsRef.current.set(agentId, { agentType, parentToolCallId });
+            // Also track in cluster window so sequential foreground agents accumulate
+            clusterWindowAgentsRef.current.set(agentId, { agentId, agentType });
             emit({
               type: "subagent:start",
               sessionId,
               agentId,
-              agentType: sub.payload.subagent_type ?? null,
+              agentType,
               parentToolCallId,
             });
 
-            // Cluster detection: if multiple subagents start within a short window,
-            // emit a cluster event
-            if (clusterTimerRef.current) {
-              clearTimeout(clusterTimerRef.current);
+            // Cluster detection: fire as soon as 2nd agent is seen.
+            // 150ms debounce batches agents launched in parallel.
+            if (clusterWindowAgentsRef.current.size >= 2 && !clusterEmittedRef.current) {
+              if (clusterTimerRef.current) clearTimeout(clusterTimerRef.current);
+              clusterTimerRef.current = setTimeout(() => {
+                if (clusterEmittedRef.current) { clusterTimerRef.current = null; return; }
+                const allAgents = new Map(clusterWindowAgentsRef.current);
+                for (const [id, info] of activeSubagentsRef.current) {
+                  if (!allAgents.has(id)) {
+                    allAgents.set(id, { agentId: id, agentType: info.agentType });
+                  }
+                }
+                if (allAgents.size >= 2) {
+                  clusterEmittedRef.current = true;
+                  emit({
+                    type: "subagent:cluster",
+                    sessionId,
+                    clusterId: `cluster_${++clusterCounterRef.current}`,
+                    agentCount: allAgents.size,
+                    agents: Array.from(allAgents.values()),
+                  });
+                }
+                clusterTimerRef.current = null;
+              }, 150);
             }
-            clusterTimerRef.current = setTimeout(() => {
-              const active = activeSubagentsRef.current;
-              if (active.size >= 2) {
-                emit({
-                  type: "subagent:cluster",
-                  sessionId,
-                  clusterId: `cluster_${++clusterCounterRef.current}`,
-                  agentCount: active.size,
-                  agents: Array.from(active.entries()).map(([id, info]) => ({
-                    agentId: id,
-                    agentType: info.agentType,
-                  })),
-                });
-              }
-              clusterTimerRef.current = null;
-            }, 500);
           }
 
           // Detect subagent completion (inner TurnEnd or step end)
@@ -226,6 +236,7 @@ export function usePluginEventEmitter() {
           activeSubagentsRef.current.clear();
           pendingAgentToolCallsRef.current.clear();
           clusterWindowAgentsRef.current.clear();
+          clusterEmittedRef.current = false;
           if (clusterTimerRef.current) {
             clearTimeout(clusterTimerRef.current);
             clusterTimerRef.current = null;
@@ -238,6 +249,11 @@ export function usePluginEventEmitter() {
           activeSubagentsRef.current.clear();
           pendingAgentToolCallsRef.current.clear();
           clusterWindowAgentsRef.current.clear();
+          clusterEmittedRef.current = false;
+          if (clusterTimerRef.current) {
+            clearTimeout(clusterTimerRef.current);
+            clusterTimerRef.current = null;
+          }
           emit({ type: "turn:end", sessionId });
           break;
         }
