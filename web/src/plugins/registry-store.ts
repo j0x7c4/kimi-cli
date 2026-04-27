@@ -101,7 +101,7 @@ const BUILTINS: BuiltinPluginDef[] = [
     description: "Shows an animated indicator when a sub-agent is spawned.",
     version: "1.0.0",
     author: "kimi-cli",
-    events: ["subagent:start", "subagent:stop"],
+    events: ["subagent:start", "subagent:cluster"],
   },
   {
     id: "builtin:subagent-cluster",

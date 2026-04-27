@@ -32,7 +32,7 @@ const SubagentAnimationPlugin: UIPlugin = {
   description: "Plays a 3-second animation when a sub-agent is spawned.",
   version: "1.0.0",
   author: "kimi-cli",
-  events: ["subagent:start"],
+  events: ["subagent:start", "subagent:cluster"],
 
   overlayConfig: {
     position: "top-right",
@@ -41,6 +41,7 @@ const SubagentAnimationPlugin: UIPlugin = {
   },
 
   render({ event }: PluginRenderProps) {
+    // Dismiss when cluster fires — SubagentClusterPlugin takes over the display
     if (event.type !== "subagent:start") return null;
 
     const e = event as SubagentStartEvent;
