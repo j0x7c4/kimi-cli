@@ -60,6 +60,7 @@ function App() {
   const { currentUser, isLoading: isAuthLoading, isAdmin, login, logout } = useAuth();
 
   // Route: /admin or /admin/ -> render admin panel
+  // biome-ignore lint/performance/useTopLevelRegex: inline regex is fine here; this hook runs rarely
   const isAdminRoute = window.location.pathname.replace(/\/$/, "") === "/admin";
 
   // Handle logout

@@ -81,7 +81,7 @@ const SubagentAnimationPlugin: UIPlugin = {
 
         {/* Spinning ring */}
         <span style={{ position: "relative", width: "22px", height: "22px", flexShrink: 0 }}>
-          <svg width="22" height="22" viewBox="0 0 22 22" style={{ animation: "saSpin 1s linear infinite" }}>
+          <svg width="22" height="22" viewBox="0 0 22 22" style={{ animation: "saSpin 1s linear infinite" }}><title>Loading</title>
             <circle cx="11" cy="11" r="9" fill="none" stroke={`${color}25`} strokeWidth="2" />
             <circle
               cx="11" cy="11" r="9" fill="none"

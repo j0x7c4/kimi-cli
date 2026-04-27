@@ -19,7 +19,7 @@ export function LoginPage({ onLogin }: LoginPageProps) {
     async (e?: FormEvent) => {
       e?.preventDefault();
       const trimmedUsername = username.trim();
-      if (!trimmedUsername || !password) {
+      if (!(trimmedUsername && password)) {
         setError("Please enter your username and password.");
         return;
       }

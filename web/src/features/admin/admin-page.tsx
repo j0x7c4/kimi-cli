@@ -150,6 +150,7 @@ function CreateUserDialog({ open, onOpenChange, onCreated }: CreateUserDialogPro
           </div>
 
           <div className="flex flex-col gap-1.5">
+            {/* biome-ignore lint/a11y/noLabelWithoutControl: Select component wraps the control */}
             <label className="text-sm font-medium text-foreground">Role</label>
             <Select value={role} onValueChange={setRole} disabled={isLoading}>
               <SelectTrigger className="w-full">
@@ -346,7 +347,7 @@ export function AdminPage({ currentUser }: AdminPageProps) {
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => (window.location.href = "/")}
+            onClick={() => { window.location.href = "/"; }}
             className="gap-2"
           >
             <ArrowLeft className="size-4" />

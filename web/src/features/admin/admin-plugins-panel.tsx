@@ -5,7 +5,6 @@ import {
   type FormEvent,
 } from "react";
 import {
-  getInstalledPlugins,
   setPluginEnabled,
   removePlugin,
   importPluginFromUrl,
@@ -76,7 +75,7 @@ function ImportPluginDialog({ open, onOpenChange, onImported }: ImportPluginDial
         setError("Plugin URL is required.");
         return;
       }
-      if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
+      if (!(trimmed.startsWith("http://") || trimmed.startsWith("https://"))) {
         setError("URL must start with http:// or https://");
         return;
       }

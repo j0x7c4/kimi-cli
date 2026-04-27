@@ -7,7 +7,7 @@
  *   2.8s ~ 4.8s  Bulb lights up, "Eureka!"
  *   4.8s ~ 5.0s  Auto-dismiss
  */
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import type { UIPlugin, PluginRenderProps } from "../types";
 
 // ---------------------------------------------------------------------------
@@ -71,6 +71,8 @@ const STAR = ["..#..", ".###.", "#####", ".###.", "..#.."];
 // Pixel rendering components
 // ---------------------------------------------------------------------------
 
+type Pixel = { key: string; color: string | null };
+
 function PixelSprite({
   grid,
   palette,
@@ -84,6 +86,13 @@ function PixelSprite({
 }) {
   const rows = grid.length;
   const cols = grid[0]?.length || 0;
+  const pixels: Pixel[] = [];
+  for (let y = 0; y < rows; y++) {
+    const chars = grid[y] ?? "";
+    for (let x = 0; x < chars.length; x++) {
+      pixels.push({ key: `${y}-${x}`, color: palette[chars[x] ?? " "] ?? null });
+    }
+  }
   return (
     <div
       style={{
@@ -95,19 +104,17 @@ function PixelSprite({
         ...style,
       }}
     >
-      {grid.flatMap((row, y) =>
-        row.split("").map((ch, x) => (
-          <div
-            key={`${x}-${y}`}
-            style={{
-              width: pixelSize,
-              height: pixelSize,
-              backgroundColor: palette[ch] || "transparent",
-              imageRendering: "pixelated",
-            }}
-          />
-        )),
-      )}
+      {pixels.map((px) => (
+        <div
+          key={px.key}
+          style={{
+            width: pixelSize,
+            height: pixelSize,
+            backgroundColor: px.color ?? "transparent",
+            imageRendering: "pixelated",
+          }}
+        />
+      ))}
     </div>
   );
 }
@@ -171,7 +178,8 @@ function ThinkingScene({ dismiss }: { dismiss: () => void }) {
   }, [dismiss]);
 
   return (
-    <div
+    <button
+      type="button"
       style={{
         width: "100vw",
         height: "100vh",
@@ -182,6 +190,8 @@ function ThinkingScene({ dismiss }: { dismiss: () => void }) {
         justifyContent: "center",
         animation: "psFadeIn 0.2s ease-out",
         cursor: "pointer",
+        border: "none",
+        padding: 0,
       }}
       onClick={dismiss}
     >
@@ -195,7 +205,6 @@ function ThinkingScene({ dismiss }: { dismiss: () => void }) {
           cursor: "default",
           pointerEvents: "none",
         }}
-        onClick={(e) => e.stopPropagation()}
       >
         <PixelText
           text={`THINKING${dots}`}
@@ -324,7 +333,7 @@ function ThinkingScene({ dismiss }: { dismiss: () => void }) {
           to { transform: scaleX(0); transform-origin: left; }
         }
       `}</style>
-    </div>
+    </button>
   );
 }
 

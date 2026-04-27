@@ -1,9 +1,7 @@
-import { useCallback, useMemo, useState, type ReactElement } from "react";
+import { useCallback, useState, type ReactElement } from "react";
 import { toast } from "sonner";
 import { Check, Cpu, Paperclip, RefreshCcw } from "lucide-react";
 import { usePromptInputAttachments } from "@ai-elements";
-import type { ConfigModel } from "@/lib/api/models";
-import { ModelCapability } from "@/lib/api/models";
 import { useGlobalConfig } from "@/hooks/useGlobalConfig";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -26,22 +24,6 @@ import {
 } from "@/components/ai-elements/model-selector";
 import { cn } from "@/lib/utils";
 
-type ThinkingState = "enabled" | "disabled" | "forced";
-
-function getThinkingState(model: ConfigModel | null): ThinkingState {
-  const capabilities = model?.capabilities;
-  if (!capabilities) {
-    return "disabled";
-  }
-  if (capabilities.has(ModelCapability.AlwaysThinking)) {
-    return "forced";
-  }
-  if (capabilities.has(ModelCapability.Thinking)) {
-    return "enabled";
-  }
-  return "disabled";
-}
-
 export type GlobalConfigControlsProps = {
   className?: string;
   planMode?: boolean;
@@ -58,22 +40,6 @@ export function GlobalConfigControls({
 
   const [isSelectorOpen, setIsSelectorOpen] = useState(false);
   const [lastBusySkip, setLastBusySkip] = useState<string[] | null>(null);
-
-  const currentModel = useMemo(() => {
-    if (!config) {
-      return null;
-    }
-    return config.models.find((m) => m.name === config.defaultModel) ?? null;
-  }, [config]);
-
-  const thinkingState = useMemo(
-    () => getThinkingState(currentModel),
-    [currentModel],
-  );
-
-  const thinkingChecked = config?.defaultThinking ?? false;
-  const thinkingDisabled =
-    isLoading || isUpdating || thinkingState !== "enabled";
 
   const handleSelectModel = useCallback(
     async (modelKey: string) => {
@@ -112,36 +78,6 @@ export function GlobalConfigControls({
     [config, update],
   );
 
-  const handleThinkingToggle = useCallback(
-    async (checked: boolean) => {
-      if (!config) {
-        return;
-      }
-      try {
-        const resp = await update({ defaultThinking: checked });
-        const skippedBusy = resp.skippedBusySessionIds ?? [];
-
-        if (skippedBusy.length > 0) {
-          setLastBusySkip(skippedBusy);
-          toast.message("Some sessions were skipped (busy)", {
-            description: `Skipped ${skippedBusy.length} busy session(s). You can retry when they are idle, or force restart.`,
-          });
-        } else {
-          setLastBusySkip(null);
-        }
-      } catch (err) {
-        const message =
-          err instanceof Error
-            ? err.message
-            : "Failed to update global thinking";
-        toast.error("Failed to update global thinking", {
-          description: message,
-        });
-      }
-    },
-    [config, update],
-  );
-
   const handleForceRestartBusy = useCallback(async () => {
     if (!lastBusySkip || lastBusySkip.length === 0) {
       return;
@@ -169,34 +105,6 @@ export function GlobalConfigControls({
       toast.error("Failed to restart busy sessions", { description: message });
     }
   }, [lastBusySkip, update]);
-
-  const thinkingTooltip = useMemo(() => {
-    if (thinkingState === "forced") {
-      return "Thinking is forced by the selected model.";
-    }
-    if (thinkingState === "disabled") {
-      return "Thinking is not supported by the selected model.";
-    }
-    return null;
-  }, [thinkingState]);
-
-  const thinkingToggle = (
-    <div className="flex h-9 items-center gap-2 rounded-md px-2">
-      <span className="text-xs text-muted-foreground">Thinking</span>
-      <Switch
-        aria-label="Toggle global thinking"
-        checked={
-          thinkingState === "forced"
-            ? true
-            : thinkingState === "disabled"
-              ? false
-              : thinkingChecked
-        }
-        disabled={thinkingDisabled}
-        onCheckedChange={handleThinkingToggle}
-      />
-    </div>
-  );
 
   const attachments = usePromptInputAttachments();
 

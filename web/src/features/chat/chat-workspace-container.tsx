@@ -115,7 +115,7 @@ export function ChatWorkspaceContainer({
       // and registered separately (admin panel handles this)
     }
 
-    return () => unregisters.forEach((u) => u());
+    return () => { for (const u of unregisters) u(); };
   }, [pluginRegistry]);
 
   const handleStreamError = useCallback((error: Error) => {

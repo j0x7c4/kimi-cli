@@ -197,7 +197,7 @@ export function PluginSystemProvider({ children }: { children: ReactNode }) {
     );
 
     return () => {
-      unsubs.forEach((u) => u());
+      for (const u of unsubs) u();
       for (const t of timers.values()) clearTimeout(t);
       for (const t of hardTimers.values()) clearTimeout(t);
       timers.clear();
