@@ -9,14 +9,14 @@ from pathlib import Path
 
 # Password hashing: prefer passlib/bcrypt, fallback to hashlib.sha256 with salt
 try:
-    from passlib.context import CryptContext as _CryptContext
+    from passlib.context import CryptContext as _CryptContext  # type: ignore[import-untyped]
 
     _pwd_context = _CryptContext(schemes=["bcrypt"], deprecated="auto")
 
     def _hash_password(plain: str) -> str:
         return _pwd_context.hash(plain)  # type: ignore[no-any-return]
 
-    def _verify_password(plain: str, hashed: str) -> bool:
+    def _verify_password(plain: str, hashed: str) -> bool:  # pyright: ignore[reportUnusedFunction]
         return _pwd_context.verify(plain, hashed)  # type: ignore[no-any-return]
 
 except Exception:

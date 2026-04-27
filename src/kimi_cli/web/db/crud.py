@@ -13,7 +13,7 @@ from typing import Any
 
 # Password hashing: prefer passlib/bcrypt, fallback to hashlib.sha256 with salt
 try:
-    from passlib.context import CryptContext as _CryptContext
+    from passlib.context import CryptContext as _CryptContext  # type: ignore[import-untyped]
 
     _pwd_context = _CryptContext(schemes=["bcrypt"], deprecated="auto")
 

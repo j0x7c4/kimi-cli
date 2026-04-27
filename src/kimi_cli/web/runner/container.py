@@ -233,7 +233,15 @@ class ContainerRunner(KimiCLIRunner):
         """Start the runner (no-op, containers started on demand)."""
         pass
 
-    async def get_or_create_session(self, session_id: UUID) -> SessionProcess:
+    def get_session(self, session_id: UUID) -> ContainerSessionProcess | None:
+        """Return the session process for the given session ID, or None."""
+        proc = self._sessions.get(session_id)
+        if proc is None:
+            return None
+        assert isinstance(proc, ContainerSessionProcess)
+        return proc
+
+    async def get_or_create_session(self, session_id: UUID) -> ContainerSessionProcess:
         """Get or create a containerized session process."""
         async with self._lock:
             if session_id not in self._sessions:
@@ -244,7 +252,9 @@ class ContainerRunner(KimiCLIRunner):
                     resource_limits=self._resource_limits,
                     extra_env=self._extra_env,
                 )
-            return self._sessions[session_id]
+            proc = self._sessions[session_id]
+            assert isinstance(proc, ContainerSessionProcess)
+            return proc
 
 
 ContainerRunner.__module__ = "kimi_cli.web.runner.process"
