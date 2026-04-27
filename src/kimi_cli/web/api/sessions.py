@@ -35,8 +35,8 @@ from kimi_cli.web.models import (
     SessionStatus,
     UpdateSessionRequest,
 )
-from kimi_cli.web.runner.messages import new_session_status_message, send_history_complete
 from kimi_cli.web.runner.container import ContainerRunner
+from kimi_cli.web.runner.messages import new_session_status_message, send_history_complete
 from kimi_cli.web.runner.process import KimiCLIRunner
 from kimi_cli.web.store.sessions import (
     JointSession,
@@ -600,7 +600,8 @@ if file_path.is_dir():
     print(json.dumps({"type": "directory", "entries": entries}))
 else:
     data = file_path.read_bytes()
-    print(json.dumps({"type": "file", "name": file_path.name, "data": base64.b64encode(data).decode()}))
+    encoded = base64.b64encode(data).decode()
+    print(json.dumps({"type": "file", "name": file_path.name, "data": encoded}))
 """
 
     proc = await asyncio.create_subprocess_exec(
@@ -640,7 +641,7 @@ else:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Invalid response from container: {e}",
-        )
+        ) from e
 
     error = result.get("error")
     if error == "traversal":
@@ -670,9 +671,7 @@ else:
         )
 
     if result.get("type") == "directory":
-        return Response(
-            content=json.dumps(result["entries"]), media_type="application/json"
-        )
+        return Response(content=json.dumps(result["entries"]), media_type="application/json")
 
     content = base64.b64decode(result["data"])
     media_type, _ = mimetypes.guess_type(result["name"])
@@ -680,9 +679,7 @@ else:
     return Response(
         content=content,
         media_type=media_type or "application/octet-stream",
-        headers={
-            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
-        },
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"},
     )
 
 
@@ -710,9 +707,7 @@ async def get_session_file(
     if isinstance(runner, ContainerRunner):
         session_process = runner.get_session(session_id)
         if session_process is not None and session_process.is_alive:
-            restrict_sensitive_apis = getattr(
-                request.app.state, "restrict_sensitive_apis", False
-            )
+            restrict_sensitive_apis = getattr(request.app.state, "restrict_sensitive_apis", False)
             max_path_depth = (
                 getattr(request.app.state, "max_public_path_depth", None)
                 or DEFAULT_MAX_PUBLIC_PATH_DEPTH

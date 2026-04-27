@@ -104,11 +104,11 @@ async def create_user_endpoint(
         with get_db() as db:
             user = create_user(db, body.username, body.password, body.role)
             return _user_to_detail(db, user)
-    except sqlite3.IntegrityError:
+    except sqlite3.IntegrityError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Username '{body.username}' already exists",
-        )
+        ) from exc
 
 
 @router.patch("/users/{user_id}", summary="Update a user (admin only)")

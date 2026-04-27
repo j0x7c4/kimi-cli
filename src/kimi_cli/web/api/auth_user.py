@@ -15,7 +15,7 @@ from kimi_cli.web.db.crud import (
     verify_password,
 )
 from kimi_cli.web.db.database import get_db
-from kimi_cli.web.user_auth import get_current_user, require_current_user
+from kimi_cli.web.user_auth import require_current_user
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 

@@ -47,7 +47,7 @@ def get_current_user(request: Request) -> dict[str, Any] | None:
 
 
 def require_current_user(
-    user: dict[str, Any] | None = Depends(get_current_user),
+    user: dict[str, Any] | None = Depends(get_current_user),  # noqa: B008
 ) -> dict[str, Any]:
     """Require an authenticated user; raise 401 if not logged in."""
     if user is None:
@@ -59,7 +59,7 @@ def require_current_user(
 
 
 def require_admin(
-    user: dict[str, Any] = Depends(require_current_user),
+    user: dict[str, Any] = Depends(require_current_user),  # noqa: B008
 ) -> dict[str, Any]:
     """Require admin role; raise 403 if the user is not an admin."""
     if user.get("role") != "admin":

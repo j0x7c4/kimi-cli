@@ -14,12 +14,11 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any
 from uuid import UUID, uuid4
 
 from kimi_cli import logger
 from kimi_cli.utils.subprocess_env import get_clean_env
-from kimi_cli.web.runner.process import KimiCLIRunner, RestartWorkersSummary, SessionProcess
+from kimi_cli.web.runner.process import KimiCLIRunner, SessionProcess
 
 # Environment variable names to forward into sandbox containers
 _SANDBOX_ENV_VARS = [
