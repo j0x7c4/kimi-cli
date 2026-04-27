@@ -267,7 +267,7 @@ export function SessionFilesPanel({
                 return (
                   <div
                     key={`${entry.type}:${itemPath}`}
-                    className="flex items-center gap-2 rounded-xl border bg-card/60 px-2.5 py-2"
+                    className="flex min-w-0 items-center gap-2 rounded-xl border bg-card/60 px-2.5 py-2"
                   >
                     {isDirectory ? (
                       <FolderIcon className="size-4 shrink-0 text-muted-foreground" />
