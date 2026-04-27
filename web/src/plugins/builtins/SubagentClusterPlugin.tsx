@@ -250,6 +250,7 @@ function MinionBot({
         position: "absolute",
         left: "50%",
         top: "50%",
+        zIndex: 20,
         transform: landed
           ? `translate(calc(-50% + ${pos.x}px), calc(-50% + ${pos.y}px))`
           : "translate(-50%, -50%) scale(0.2)",
