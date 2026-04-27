@@ -90,9 +90,9 @@ const BUILTINS: BuiltinPluginDef[] = [
   {
     id: "builtin:thinking-animation",
     name: "Thinking Animation",
-    description: "Shows an animated overlay badge while the agent is thinking.",
-    version: "1.0.0",
-    author: "kimi-cli",
+    description: "Pixel-art robot thinking animation with phased bulb/eureka sequence.",
+    version: "2.0.0",
+    author: "Pixel Studio",
     events: ["thinking:start", "thinking:end"],
   },
   {
@@ -105,11 +105,11 @@ const BUILTINS: BuiltinPluginDef[] = [
   },
   {
     id: "builtin:subagent-cluster",
-    name: "Subagent Cluster Visualization",
+    name: "Subagent Cluster",
     description:
-      "Displays an orbital animation when multiple sub-agents are launched concurrently.",
+      "Pixel-art summoning animation when subagents spawn in cluster.",
     version: "2.0.0",
-    author: "kimi-cli",
+    author: "Pixel Studio",
     events: ["subagent:cluster"],
   },
 ];

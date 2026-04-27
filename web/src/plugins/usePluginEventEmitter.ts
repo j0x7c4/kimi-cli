@@ -6,7 +6,7 @@
  * useSessionStream's onWireEventForPlugin callback.
  */
 import { useCallback, useRef } from "react";
-import type { WireEvent, ContentPartEvent, SubagentEventWire } from "@/hooks/wireTypes";
+import type { WireEvent, ContentPartEvent, SubagentEventWire, ToolCallEvent } from "@/hooks/wireTypes";
 import type { PluginEvent } from "./types";
 import { usePluginBus } from "./PluginSystemProvider";
 
@@ -21,11 +21,16 @@ export type WireEventContext = {
   isReplay: boolean;
 };
 
+/** Tool names that represent agent/subagent invocations */
+const AGENT_TOOL_NAMES = new Set(["Agent", "agent", "dispatch_agent"]);
+
 export function usePluginEventEmitter() {
   const bus = usePluginBus();
   const thinkingRef = useRef<ThinkingState | null>(null);
-  // Track active subagents for cluster detection
+  // Track active subagents for cluster detection (from SubagentEvent wire events)
   const activeSubagentsRef = useRef<Map<string, { agentType: string | null; parentToolCallId: string }>>(new Map());
+  // Track agent ToolCall events for cluster detection (covers background agents)
+  const pendingAgentToolCallsRef = useRef<Map<string, { toolCallId: string; agentType: string | null }>>(new Map());
   const clusterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const clusterCounterRef = useRef(0);
 
@@ -62,6 +67,76 @@ export function usePluginEventEmitter() {
       }
 
       switch (wireEvent.type) {
+        case "ToolCall": {
+          const tc = wireEvent as ToolCallEvent;
+          const toolName = tc.payload.function?.name;
+          if (AGENT_TOOL_NAMES.has(toolName)) {
+            // Parse agent type from tool call arguments
+            let agentType: string | null = null;
+            try {
+              const args = JSON.parse(tc.payload.function.arguments);
+              agentType = args.subagent_type ?? args.description ?? null;
+            } catch {
+              // ignore parse errors
+            }
+            const toolCallId = tc.payload.id;
+            pendingAgentToolCallsRef.current.set(toolCallId, { toolCallId, agentType });
+
+            emit({
+              type: "subagent:start",
+              sessionId,
+              agentId: toolCallId,
+              agentType,
+              parentToolCallId: toolCallId,
+            });
+
+            // Cluster detection: debounce — if multiple Agent tool calls arrive
+            // within a short window, emit a cluster event
+            if (clusterTimerRef.current) {
+              clearTimeout(clusterTimerRef.current);
+            }
+            clusterTimerRef.current = setTimeout(() => {
+              const pending = pendingAgentToolCallsRef.current;
+              const active = activeSubagentsRef.current;
+              // Merge both sources for cluster count
+              const allAgents = new Map<string, { agentId: string; agentType: string | null }>();
+              for (const [id, info] of active) {
+                allAgents.set(id, { agentId: id, agentType: info.agentType });
+              }
+              for (const [id, info] of pending) {
+                if (!allAgents.has(id)) {
+                  allAgents.set(id, { agentId: id, agentType: info.agentType });
+                }
+              }
+              if (allAgents.size >= 2) {
+                emit({
+                  type: "subagent:cluster",
+                  sessionId,
+                  clusterId: `cluster_${++clusterCounterRef.current}`,
+                  agentCount: allAgents.size,
+                  agents: Array.from(allAgents.values()),
+                });
+              }
+              clusterTimerRef.current = null;
+            }, 500);
+          }
+          break;
+        }
+
+        case "ToolResult": {
+          // Clean up pending agent tool calls on result
+          const tr = wireEvent as { type: "ToolResult"; payload: { tool_call_id: string } };
+          if (pendingAgentToolCallsRef.current.has(tr.payload.tool_call_id)) {
+            pendingAgentToolCallsRef.current.delete(tr.payload.tool_call_id);
+            emit({
+              type: "subagent:stop",
+              sessionId,
+              agentId: tr.payload.tool_call_id,
+            });
+          }
+          break;
+        }
+
         case "ContentPart": {
           const cp = wireEvent as ContentPartEvent;
           if (cp.payload.type === "think" && cp.payload.think) {
@@ -149,12 +224,14 @@ export function usePluginEventEmitter() {
 
         case "TurnBegin": {
           activeSubagentsRef.current.clear();
+          pendingAgentToolCallsRef.current.clear();
           emit({ type: "turn:begin", sessionId, turnIndex: 0 });
           break;
         }
 
         case "StepInterrupted": {
           activeSubagentsRef.current.clear();
+          pendingAgentToolCallsRef.current.clear();
           emit({ type: "turn:end", sessionId });
           break;
         }

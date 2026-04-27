@@ -1,215 +1,442 @@
 /**
- * Built-in subagent cluster animation plugin.
- * Plays a 3-second orbital formation animation when multiple sub-agents
- * are launched concurrently, then auto-dismisses.
+ * Built-in subagent cluster animation plugin — Pixel Studio style.
+ *
+ * Phases:
+ *   0.0s ~ 0.5s  Hero robot appears center, signal waves expand
+ *   0.6s ~ 2.4s  Minion bots fly out from center to circular positions
+ *   2.4s ~ 4.4s  All bots float, "All units online!"
+ *   5.0s         Auto-dismiss
  */
+import { useState, useEffect, useMemo } from "react";
 import type {
   UIPlugin,
   PluginRenderProps,
   SubagentClusterEvent,
 } from "../types";
 
-const NODE_COLORS = [
-  "#3b82f6", "#8b5cf6", "#10b981", "#f59e0b",
-  "#ef4444", "#ec4899", "#06b6d4", "#f97316",
+// ---------------------------------------------------------------------------
+// Palette & Sprites
+// ---------------------------------------------------------------------------
+
+const PALETTE: Record<string, string | null> = {
+  " ": null,
+  "#": "#0f172a",
+  B: "#3b82f6",
+  L: "#93c5fd",
+  D: "#1e3a8a",
+  Y: "#facc15",
+  W: "#ffffff",
+  P: "#f472b6",
+  R: "#ef4444",
+  G: "#22c55e",
+  O: "#fb923c",
+  C: "#06b6d4",
+};
+
+const HERO_WAVE = [
+  " ....######.... ",
+  " ...#BBBBBB#... ",
+  " ..#BBBBBBBB#.. ",
+  " ..#BYBBBBGB#.. ",
+  " ..#BBBBBBBB#.. ",
+  " .#.#BBBBBB#.#. ",
+  " .#..#BBBB#..#. ",
+  " ....#BBBB#.... ",
+  " ...#BBBBBB#... ",
+  " ..#BBBBBBBB#.. ",
+  " ..#BBBBBBBB#.. ",
+  " ..#BBBBBBBB#.. ",
+  " ...########... ",
 ];
+
+const MINION_IDLE = [
+  " ..####.. ",
+  ".#BBBBBB#.",
+  "#BYBBBBGB#",
+  "#BBBBBBBB#",
+  ".#BBBBBB#.",
+  "..#BBBB#..",
+  "..#BBBB#..",
+  ".#BBBBBB#.",
+  "..######..",
+];
+
+const MINION_THEMES = [
+  { B: "#3b82f6", L: "#93c5fd", D: "#1e3a8a" },
+  { B: "#ef4444", L: "#fca5a5", D: "#991b1b" },
+  { B: "#22c55e", L: "#86efac", D: "#166534" },
+  { B: "#f59e0b", L: "#fcd34d", D: "#92400e" },
+  { B: "#a855f7", L: "#d8b4fe", D: "#6b21a8" },
+  { B: "#06b6d4", L: "#67e8f9", D: "#155e75" },
+  { B: "#ec4899", L: "#fbcfe8", D: "#9d174d" },
+  { B: "#84cc16", L: "#d9f99d", D: "#3f6212" },
+];
+
+const SPAWN_DURATION = 2400;
+const HOLD_DURATION = 2000;
+const FLY_RADIUS = 150;
+
+// ---------------------------------------------------------------------------
+// Pixel rendering components
+// ---------------------------------------------------------------------------
+
+function PixelSprite({
+  grid,
+  palette,
+  pixelSize = 4,
+  style = {},
+}: {
+  grid: string[];
+  palette: Record<string, string | null>;
+  pixelSize?: number;
+  style?: React.CSSProperties;
+}) {
+  const rows = grid.length;
+  const cols = grid[0]?.length || 0;
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: `repeat(${cols}, ${pixelSize}px)`,
+        gridTemplateRows: `repeat(${rows}, ${pixelSize}px)`,
+        gap: 0,
+        lineHeight: 0,
+        ...style,
+      }}
+    >
+      {grid.flatMap((row, y) =>
+        row.split("").map((ch, x) => (
+          <div
+            key={`${x}-${y}`}
+            style={{
+              width: pixelSize,
+              height: pixelSize,
+              backgroundColor: palette[ch] || "transparent",
+              imageRendering: "pixelated",
+            }}
+          />
+        )),
+      )}
+    </div>
+  );
+}
+
+function PixelText({
+  text,
+  size = 16,
+  color = "#e2e8f0",
+  style = {},
+}: {
+  text: string;
+  size?: number;
+  color?: string;
+  style?: React.CSSProperties;
+}) {
+  return (
+    <div
+      style={{
+        fontFamily: '"Courier New", Courier, "SF Mono", Monaco, monospace',
+        fontSize: size,
+        fontWeight: 800,
+        color,
+        letterSpacing: "0.08em",
+        lineHeight: 1.3,
+        textAlign: "center",
+        textShadow: "2px 2px 0px rgba(0,0,0,0.5)",
+        ...style,
+      }}
+    >
+      {text}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Signal waves
+// ---------------------------------------------------------------------------
+
+function SignalWaves() {
+  const [waves, setWaves] = useState<{ id: number; born: number }[]>([]);
+
+  useEffect(() => {
+    const timers = [0, 500, 1000].map((delay, i) =>
+      setTimeout(() => {
+        setWaves((prev) => [...prev, { id: Date.now() + i, born: Date.now() }]);
+      }, delay),
+    );
+    return () => timers.forEach(clearTimeout);
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      setWaves((prev) => prev.filter((w) => now - w.born < 1500));
+    }, 300);
+    return () => clearInterval(interval);
+  }, []);
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        inset: 0,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        pointerEvents: "none",
+      }}
+    >
+      {waves.map((w) => (
+        <div
+          key={w.id}
+          style={{
+            position: "absolute",
+            width: "80px",
+            height: "80px",
+            border: "3px solid rgba(59,130,246,0.9)",
+            borderRadius: "4px",
+            animation: "psSignal 1.2s ease-out forwards",
+            imageRendering: "pixelated",
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Minion bot
+// ---------------------------------------------------------------------------
+
+function MinionBot({
+  index,
+  total,
+  agentType,
+  delay,
+}: {
+  index: number;
+  total: number;
+  agentType: string;
+  delay: number;
+}) {
+  const [landed, setLanded] = useState(false);
+
+  const pos = useMemo(() => {
+    const angle = (index / total) * Math.PI * 2 - Math.PI / 2;
+    return {
+      x: Math.cos(angle) * FLY_RADIUS,
+      y: Math.sin(angle) * FLY_RADIUS,
+    };
+  }, [index, total]);
+
+  const theme = MINION_THEMES[index % MINION_THEMES.length];
+  const palette = { ...PALETTE, ...theme };
+
+  useEffect(() => {
+    const t = setTimeout(() => setLanded(true), delay);
+    return () => clearTimeout(t);
+  }, [delay]);
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left: "50%",
+        top: "50%",
+        transform: landed
+          ? `translate(calc(-50% + ${pos.x}px), calc(-50% + ${pos.y}px))`
+          : "translate(-50%, -50%) scale(0.2)",
+        opacity: landed ? 1 : 0,
+        transition: "all 0.6s cubic-bezier(0.34, 1.56, 0.64, 1)",
+      }}
+    >
+      {/* Inner wrapper for float animation — keeps it separate from positioning transform */}
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: "6px",
+          animation: landed ? "psFloat 2s ease-in-out infinite" : "none",
+          animationDelay: `${index * 0.15}s`,
+        }}
+      >
+        <PixelSprite
+          grid={MINION_IDLE}
+          palette={palette}
+          pixelSize={5}
+          style={{ filter: "drop-shadow(0 4px 0 rgba(0,0,0,0.25))" }}
+        />
+        {agentType && (
+          <PixelText text={agentType} size={10} color={theme.L} style={{ marginTop: "2px" }} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Scene
+// ---------------------------------------------------------------------------
+
+function ClusterScene({
+  agents,
+  dismiss,
+}: {
+  agents: Array<{ agentId: string; agentType: string | null }>;
+  dismiss: () => void;
+}) {
+  const [phase, setPhase] = useState(0);
+  const count = Math.min(agents.length, 8);
+
+  useEffect(() => {
+    const t1 = setTimeout(() => setPhase(1), SPAWN_DURATION);
+    const t2 = setTimeout(() => {
+      setPhase(2);
+      dismiss();
+    }, SPAWN_DURATION + HOLD_DURATION + 600);
+
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
+  }, [dismiss]);
+
+  return (
+    <div
+      style={{
+        width: "100vw",
+        height: "100vh",
+        backgroundColor: "rgba(15,23,42,0.88)",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        animation: "psFadeIn 0.2s ease-out",
+        cursor: "pointer",
+      }}
+      onClick={dismiss}
+    >
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: "24px",
+          cursor: "default",
+          pointerEvents: "none",
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <PixelText
+          text={`${agents.length} AGENTS DEPLOYED`}
+          size={18}
+          color="#60a5fa"
+          style={{ marginBottom: "4px" }}
+        />
+        <PixelText
+          text="CLUSTER MODE ACTIVATED"
+          size={11}
+          color="#475569"
+          style={{ marginBottom: "16px" }}
+        />
+
+        {/* Stage */}
+        <div
+          style={{
+            position: "relative",
+            width: `${FLY_RADIUS * 2 + 120}px`,
+            height: `${FLY_RADIUS * 2 + 80}px`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <SignalWaves />
+
+          {/* Hero bot center */}
+          <div style={{ zIndex: 10, animation: "psPulse 2s ease-in-out infinite" }}>
+            <PixelSprite
+              grid={HERO_WAVE}
+              palette={PALETTE}
+              pixelSize={8}
+              style={{ filter: "drop-shadow(0 10px 0 rgba(0,0,0,0.3))" }}
+            />
+          </div>
+
+          {/* Minion bots */}
+          {agents.slice(0, count).map((agent, i) => (
+            <MinionBot
+              key={agent.agentId}
+              index={i}
+              total={count}
+              agentType={agent.agentType?.slice(0, 8) || `BOT-${i + 1}`}
+              delay={400 + i * 220}
+            />
+          ))}
+        </div>
+
+        <PixelText
+          text={phase === 0 ? "Summoning units..." : "All units online!"}
+          size={12}
+          color={phase === 0 ? "#64748b" : "#4ade80"}
+          style={{ marginTop: "20px" }}
+        />
+      </div>
+
+      <style>{`
+        @keyframes psFadeIn {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+        @keyframes psFloat {
+          0%, 100% { transform: translateY(0); }
+          50% { transform: translateY(-8px); }
+        }
+        @keyframes psPulse {
+          0% { transform: scale(1); opacity: 1; }
+          50% { transform: scale(1.05); opacity: 0.9; }
+          100% { transform: scale(1); opacity: 1; }
+        }
+        @keyframes psSignal {
+          0% { transform: scale(0.5); opacity: 1; border-color: rgba(59,130,246,0.8); }
+          100% { transform: scale(2.5); opacity: 0; border-color: rgba(59,130,246,0); }
+        }
+      `}</style>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Plugin export
+// ---------------------------------------------------------------------------
 
 const SubagentClusterPlugin: UIPlugin = {
   id: "builtin:subagent-cluster",
   name: "Subagent Cluster",
-  description: "Plays an orbital formation animation when multiple sub-agents launch concurrently.",
+  description:
+    "Pixel-art summoning animation when subagents spawn in cluster. Auto-dismiss within 5s.",
   version: "2.0.0",
-  author: "kimi-cli",
+  author: "Pixel Studio",
   events: ["subagent:cluster"],
 
   overlayConfig: {
-    position: "bottom-right",
-    zIndex: 9400,
-    autoDismissMs: 3000,
+    position: "full",
+    dismissible: true,
+    zIndex: 9600,
   },
 
-  render({ event }: PluginRenderProps) {
+  render({ event, dismiss }: PluginRenderProps) {
     if (event.type !== "subagent:cluster") return null;
 
     const cluster = event as SubagentClusterEvent;
-    const count = cluster.agentCount;
-    const size = Math.min(200, 120 + count * 16);
-    const orbitR = size * 0.32;
-    const cx = size / 2;
-    const cy = size / 2;
-
-    const nodes = cluster.agents.map((agent, i) => {
-      const angle = (2 * Math.PI * i) / count - Math.PI / 2;
-      return {
-        x: cx + orbitR * Math.cos(angle),
-        y: cy + orbitR * Math.sin(angle),
-        lx: cx + (orbitR + 20) * Math.cos(angle),
-        ly: cy + (orbitR + 20) * Math.sin(angle),
-        color: NODE_COLORS[i % NODE_COLORS.length],
-        label: agent.agentType ?? `#${i + 1}`,
-        delay: i * 0.1,
-      };
-    });
-
     return (
-      <div
-        style={{
-          background: "linear-gradient(145deg, #0c1222 0%, #1a1f3a 100%)",
-          borderRadius: "16px",
-          padding: "14px",
-          boxShadow: "0 12px 40px rgba(0,0,0,0.4), inset 0 0 0 1px rgba(99,102,241,0.12)",
-          animation: "scEnter 0.4s cubic-bezier(0.16,1,0.3,1), scExit 0.4s ease-in 2.6s forwards",
-          position: "relative",
-          overflow: "hidden",
-        }}
-      >
-        {/* Background pulse */}
-        <div
-          style={{
-            position: "absolute",
-            top: "50%", left: "50%",
-            width: `${size * 0.8}px`, height: `${size * 0.8}px`,
-            transform: "translate(-50%, -50%)",
-            borderRadius: "50%",
-            background: "radial-gradient(circle, rgba(99,102,241,0.08) 0%, transparent 70%)",
-            animation: "scBgPulse 2s ease-in-out infinite",
-            pointerEvents: "none",
-          }}
-        />
-
-        {/* Header */}
-        <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px", position: "relative" }}>
-          <span
-            style={{
-              display: "inline-flex", alignItems: "center", justifyContent: "center",
-              width: "22px", height: "22px", borderRadius: "6px",
-              background: "rgba(99,102,241,0.15)", fontSize: "12px",
-            }}
-          >
-            &#x26A1;
-          </span>
-          <div>
-            <div style={{ color: "#e2e8f0", fontWeight: 600, fontSize: "13px", lineHeight: 1.2 }}>
-              Cluster Formation
-            </div>
-            <div style={{ color: "#64748b", fontSize: "11px" }}>
-              {count} agents launching
-            </div>
-          </div>
-        </div>
-
-        {/* Orbital SVG */}
-        <div style={{ position: "relative", width: `${size}px`, height: `${size}px`, margin: "0 auto 6px" }}>
-          <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ position: "absolute", top: 0, left: 0 }}>
-            {/* Orbit ring — draws in */}
-            <circle
-              cx={cx} cy={cy} r={orbitR}
-              fill="none" stroke="rgba(99,102,241,0.15)" strokeWidth="1"
-              strokeDasharray={`${2 * Math.PI * orbitR}`}
-              strokeDashoffset={`${2 * Math.PI * orbitR}`}
-              style={{ animation: "scOrbitDraw 0.8s ease-out 0.1s forwards" }}
-            />
-
-            {/* Connections — fade in */}
-            {nodes.map((n, i) =>
-              nodes.slice(i + 1).map((m, j) => (
-                <line
-                  key={`${i}-${i + 1 + j}`}
-                  x1={n.x} y1={n.y} x2={m.x} y2={m.y}
-                  stroke="rgba(99,102,241,0.06)" strokeWidth="1"
-                  style={{ animation: `scLine 0.4s ease-out ${Math.max(n.delay, m.delay) + 0.3}s both` }}
-                />
-              )),
-            )}
-
-            {/* Center hub */}
-            <circle cx={cx} cy={cy} r="10" fill="rgba(99,102,241,0.12)" style={{ animation: "scHubPulse 2s ease-in-out infinite" }} />
-            <circle cx={cx} cy={cy} r="3.5" fill="#6366f1" />
-
-            {/* Agent nodes — pop in sequentially */}
-            {nodes.map((n, i) => (
-              <g key={i} style={{ animation: `scNodePop 0.35s cubic-bezier(0.34,1.56,0.64,1) ${n.delay + 0.2}s both` }}>
-                <circle cx={n.x} cy={n.y} r="12" fill={`${n.color}10`} style={{ animation: `scGlow 2s ease-in-out ${n.delay}s infinite` }} />
-                <circle cx={n.x} cy={n.y} r="6" fill={`${n.color}25`} stroke={n.color} strokeWidth="1.5" />
-                <circle cx={n.x} cy={n.y} r="2" fill={n.color} />
-              </g>
-            ))}
-          </svg>
-
-          {/* Node labels */}
-          {nodes.map((n, i) => (
-            <div
-              key={i}
-              style={{
-                position: "absolute",
-                left: `${n.lx}px`, top: `${n.ly}px`,
-                transform: "translate(-50%, -50%)",
-                fontSize: "10px", fontWeight: 500,
-                color: n.color,
-                whiteSpace: "nowrap",
-                textShadow: "0 1px 4px rgba(0,0,0,0.8)",
-                animation: `scLabelIn 0.3s ease-out ${n.delay + 0.4}s both`,
-              }}
-            >
-              {n.label}
-            </div>
-          ))}
-        </div>
-
-        {/* Bottom progress */}
-        <div
-          style={{
-            position: "absolute",
-            bottom: 0, left: 0,
-            height: "2px",
-            background: "linear-gradient(90deg, #6366f1, #6366f160)",
-            animation: "scProgress 3s linear forwards",
-            borderRadius: "0 0 16px 16px",
-          }}
-        />
-
-        <style>{`
-          @keyframes scEnter {
-            from { transform: scale(0.8) translateY(20px); opacity: 0; }
-            to { transform: scale(1) translateY(0); opacity: 1; }
-          }
-          @keyframes scExit {
-            from { transform: scale(1); opacity: 1; }
-            to { transform: scale(0.9) translateY(10px); opacity: 0; }
-          }
-          @keyframes scOrbitDraw {
-            to { stroke-dashoffset: 0; }
-          }
-          @keyframes scNodePop {
-            from { transform: scale(0); opacity: 0; }
-            to { transform: scale(1); opacity: 1; }
-          }
-          @keyframes scLine {
-            from { opacity: 0; }
-            to { opacity: 1; }
-          }
-          @keyframes scHubPulse {
-            0%, 100% { r: 10; opacity: 0.2; }
-            50% { r: 14; opacity: 0.08; }
-          }
-          @keyframes scGlow {
-            0%, 100% { r: 12; opacity: 0.25; }
-            50% { r: 16; opacity: 0.08; }
-          }
-          @keyframes scLabelIn {
-            from { opacity: 0; transform: translate(-50%, -50%) translateY(4px); }
-            to { opacity: 1; transform: translate(-50%, -50%) translateY(0); }
-          }
-          @keyframes scBgPulse {
-            0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 0.5; }
-            50% { transform: translate(-50%, -50%) scale(1.15); opacity: 0.3; }
-          }
-          @keyframes scProgress {
-            from { width: 0%; }
-            to { width: 100%; }
-          }
-        `}</style>
-      </div>
+      <ClusterScene
+        agents={cluster.agents}
+        dismiss={dismiss}
+        key={cluster.clusterId}
+      />
     );
   },
 };
