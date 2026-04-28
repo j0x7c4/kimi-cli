@@ -357,7 +357,13 @@ async def create_session(
             )
         work_dir = KaosPath.unsafe_from_local_path(work_dir_path)
     else:
-        work_dir = KaosPath.unsafe_from_local_path(Path.home())
+        default_dir = os.environ.get("KIMI_DEFAULT_WORK_DIR")
+        if default_dir:
+            default_path = Path(default_dir).expanduser().resolve()
+            default_path.mkdir(parents=True, exist_ok=True)
+            work_dir = KaosPath.unsafe_from_local_path(default_path)
+        else:
+            work_dir = KaosPath.unsafe_from_local_path(Path.home())
     kimi_cli_session = await KimiCLISession.create(work_dir=work_dir)
     context_file = kimi_cli_session.dir / "context.jsonl"
 
