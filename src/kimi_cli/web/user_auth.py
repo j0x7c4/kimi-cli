@@ -70,8 +70,44 @@ def require_admin(
     return user
 
 
+def get_current_user_sse(request: Request) -> dict[str, Any] | None:
+    """Same as :func:`get_current_user` but also accepts a ``?token=`` query param.
+
+    Browser ``EventSource`` cannot send custom headers, so SSE consumers pass
+    the token in the URL. Cookie auth still wins when both are present.
+    """
+    user = get_current_user(request)
+    if user is not None:
+        return user
+    query_token = request.query_params.get("token")
+    if not query_token:
+        return None
+    try:
+        db = get_db()
+        try:
+            return get_user_session(db, query_token)
+        finally:
+            db.close()
+    except Exception:
+        return None
+
+
+def require_current_user_sse(
+    user: dict[str, Any] | None = Depends(get_current_user_sse),  # noqa: B008
+) -> dict[str, Any]:
+    """SSE-friendly variant of :func:`require_current_user`."""
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+        )
+    return user
+
+
 __all__ = [
     "get_current_user",
+    "get_current_user_sse",
     "require_admin",
     "require_current_user",
+    "require_current_user_sse",
 ]

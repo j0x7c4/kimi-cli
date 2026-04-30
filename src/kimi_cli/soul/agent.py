@@ -20,6 +20,7 @@ from kimi_cli.background import BackgroundTaskManager
 from kimi_cli.config import Config
 from kimi_cli.exception import MCPConfigError, SystemPromptTemplateError
 from kimi_cli.llm import LLM
+from kimi_cli.memory import get_user_memory_dir, load_knowledge_base
 from kimi_cli.notifications import NotificationManager
 from kimi_cli.session import Session
 from kimi_cli.skill import (
@@ -56,6 +57,8 @@ class BuiltinSystemPromptArgs:
     """The directory listing of current working directory."""
     KIMI_AGENTS_MD: str  # TODO: move to first message from system prompt
     """The merged content of AGENTS.md files (from project root to work_dir)."""
+    KIMI_KNOWLEDGE_BASE: str
+    """The merged shared knowledge base from {work_dir}/.kimi/memory/knowledge/."""
     KIMI_SKILLS: str
     """Formatted information about available skills."""
     KIMI_ADDITIONAL_DIRS_INFO: str
@@ -189,6 +192,9 @@ class Runtime:
     skills: dict[str, Skill]
     additional_dirs: list[KaosPath]
     skills_dirs: list[KaosPath]
+    user_memory_dir: Path
+    """User-private memory directory ({KIMI_SHARE_DIR}/users/<owner_id>/memory/).
+    Derived from KIMI_USER_ID env var (set by sandbox runner) or session owner_id."""
     subagent_store: SubagentStore | None = None
     approval_runtime: ApprovalRuntime | None = None
     root_wire_hub: RootWireHub | None = None
@@ -218,11 +224,19 @@ class Runtime:
         yolo: bool,
         skills_dirs: list[KaosPath] | None = None,
     ) -> Runtime:
-        ls_output, agents_md, environment = await asyncio.gather(
+        work_dir_local = Path(str(session.work_dir))
+        ls_output, agents_md, environment, knowledge_base = await asyncio.gather(
             list_directory(session.work_dir),
             load_agents_md(session.work_dir),
             Environment.detect(),
+            asyncio.to_thread(load_knowledge_base, work_dir_local),
         )
+
+        # Resolve the user-private memory directory.  KIMI_USER_ID is set by
+        # the sandbox runner from SessionState.owner_id; in local-mode CLI use
+        # we fall back to the loaded session state.
+        owner_id = os.environ.get("KIMI_USER_ID") or session.state.owner_id
+        user_memory_dir = get_user_memory_dir(owner_id)
 
         # Discover and format skills (grouped by scope for the system prompt).
         scoped_roots = await resolve_skills_roots(
@@ -301,6 +315,7 @@ class Runtime:
                 KIMI_WORK_DIR=session.work_dir,
                 KIMI_WORK_DIR_LS=ls_output,
                 KIMI_AGENTS_MD=agents_md or "",
+                KIMI_KNOWLEDGE_BASE=knowledge_base or "",
                 KIMI_SKILLS=skills_formatted or "No skills found.",
                 KIMI_ADDITIONAL_DIRS_INFO=additional_dirs_info,
                 KIMI_OS=environment.os_kind,
@@ -324,6 +339,7 @@ class Runtime:
             skills_dirs=[
                 r for r in skills_roots_canonical if not is_within_directory(r, session.work_dir)
             ],
+            user_memory_dir=user_memory_dir,
             subagent_store=SubagentStore(session),
             approval_runtime=ApprovalRuntime(),
             root_wire_hub=RootWireHub(),
@@ -354,6 +370,7 @@ class Runtime:
             # Share the same list reference so /add-dir mutations propagate to all agents
             additional_dirs=self.additional_dirs,
             skills_dirs=self.skills_dirs,
+            user_memory_dir=self.user_memory_dir,
             subagent_store=self.subagent_store,
             approval_runtime=self.approval_runtime,
             root_wire_hub=self.root_wire_hub,

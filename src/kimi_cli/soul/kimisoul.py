@@ -59,7 +59,11 @@ from kimi_cli.soul.dynamic_injection import (
     DynamicInjectionProvider,
     normalize_history,
 )
+from kimi_cli.soul.dynamic_injections.cross_session_memory import (
+    CrossSessionMemoryInjectionProvider,
+)
 from kimi_cli.soul.dynamic_injections.plan_mode import PlanModeInjectionProvider
+from kimi_cli.soul.dynamic_injections.session_memory import SessionMemoryInjectionProvider
 from kimi_cli.soul.dynamic_injections.yolo_mode import YoloModeInjectionProvider
 from kimi_cli.soul.message import check_message, system, system_reminder, tool_result_to_message
 from kimi_cli.soul.slash import registry as soul_slash_registry
@@ -204,6 +208,10 @@ class KimiSoul:
                 if self._runtime.config.skip_yolo_prompt_injection
                 else [YoloModeInjectionProvider()]
             ),
+            SessionMemoryInjectionProvider(),
+            # Subagents share the parent's session and don't get their own
+            # cross-session memory snapshot.
+            *([CrossSessionMemoryInjectionProvider()] if self._runtime.role == "root" else []),
         ]
         self._hook_engine: HookEngine = HookEngine()
         self._stop_hook_active: bool = False
@@ -1156,6 +1164,14 @@ class KimiSoul:
             )
         )
         _hook_task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+        # Fire-and-forget: archive the LLM-produced summary into the user's
+        # cross-session memory. Failures must never block the main loop.
+        if self._runtime.role == "root":
+            from kimi_cli.memory.archivist import archive_compaction
+
+            _archive_task = asyncio.create_task(archive_compaction(self, compaction_result))
+            _archive_task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
     @staticmethod
     def _is_retryable_error(exception: BaseException) -> bool:
