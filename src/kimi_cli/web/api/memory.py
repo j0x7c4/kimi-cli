@@ -20,7 +20,7 @@ import contextlib
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -84,6 +84,11 @@ def _resolve_session_work_dir(session_id: UUID) -> Path:
     session = load_session_by_id(session_id)
     if session is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    if session.work_dir is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Session has no work_dir",
+        )
     return Path(session.work_dir)
 
 
@@ -344,10 +349,11 @@ def _load_context_messages(path: Path) -> list[Message]:
                 continue
             if not isinstance(obj, dict):
                 continue
-            if obj.get("role") in _CONTEXT_NON_MESSAGE_ROLES:
+            obj_dict = cast(dict[str, Any], obj)
+            if obj_dict.get("role") in _CONTEXT_NON_MESSAGE_ROLES:
                 continue
             try:
-                out.append(Message.model_validate(obj))
+                out.append(Message.model_validate(obj_dict))
             except ValidationError as exc:
                 logger.warning(
                     "Skipping invalid context message line {n} in {p}: {e}",

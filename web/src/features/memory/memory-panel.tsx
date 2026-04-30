@@ -120,7 +120,13 @@ function PersistentTab() {
         <div className="text-sm font-medium">
           {loading ? "Loading…" : `${entries.length} entries`}
         </div>
-        <Button size="sm" variant="outline" onClick={() => void refresh()}>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => {
+            refresh();
+          }}
+        >
           <RefreshCcw className="mr-1 h-3.5 w-3.5" /> Refresh
         </Button>
       </div>
@@ -217,7 +223,13 @@ function RecentTab() {
         <div className="text-sm font-medium">
           {loading ? "Loading…" : `${items.length} summaries`}
         </div>
-        <Button size="sm" variant="outline" onClick={() => void refresh()}>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => {
+            refresh();
+          }}
+        >
           <RefreshCcw className="mr-1 h-3.5 w-3.5" /> Refresh
         </Button>
       </div>
@@ -253,8 +265,8 @@ function KnowledgeTab({ sessionId }: { sessionId: string | null }) {
   const [newName, setNewName] = useState("");
 
   useEffect(() => {
-    if (!selected || !sessionId) return;
-    void readKnowledge(sessionId, selected).then((f) => {
+    if (!(selected && sessionId)) return;
+    readKnowledge(sessionId, selected).then((f) => {
       setContent(f.content);
       setOriginalContent(f.content);
     });
@@ -280,7 +292,7 @@ function KnowledgeTab({ sessionId }: { sessionId: string | null }) {
   }, [sessionId, selected, newName, content, refresh]);
 
   const handleDelete = useCallback(async () => {
-    if (!sessionId || !selected) return;
+    if (!(sessionId && selected)) return;
     setBusy(true);
     try {
       await deleteKnowledge(sessionId, selected);
@@ -306,7 +318,13 @@ function KnowledgeTab({ sessionId }: { sessionId: string | null }) {
         <div className="text-sm font-medium">
           {loading ? "Loading…" : `${files.length} files`}
         </div>
-        <Button size="sm" variant="outline" onClick={() => void refresh()}>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => {
+            refresh();
+          }}
+        >
           <RefreshCcw className="mr-1 h-3.5 w-3.5" /> Refresh
         </Button>
       </div>
@@ -352,7 +370,11 @@ function KnowledgeTab({ sessionId }: { sessionId: string | null }) {
             <Button
               size="sm"
               onClick={handleSave}
-              disabled={busy || (!selected && !newName.trim()) || (!!selected && content === originalContent)}
+              disabled={
+                busy ||
+                !(selected || newName.trim()) ||
+                (!!selected && content === originalContent)
+              }
             >
               {busy ? (
                 <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
