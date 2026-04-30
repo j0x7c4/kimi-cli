@@ -28,6 +28,7 @@ import {
   CheckSquare,
   Square,
   PanelLeftClose,
+  BookmarkPlus,
 } from "lucide-react";
 import { Virtuoso } from "react-virtuoso";
 import { KimiCliBrand } from "@/components/kimi-cli-brand";
@@ -39,6 +40,15 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Kbd, KbdGroup } from "@/components/ui/kbd";
@@ -59,13 +69,60 @@ import { cn, } from "@/lib/utils";
 const NEWLINE_REGEX = /\r\n|\r|\n/;
 const WHITESPACE_REGEX = /\s+/g;
 
+export type ArchiveState = "gray" | "in_progress" | "green" | "yellow" | "red";
+
 type SessionSummary = {
   id: string;
   title: string;
   updatedAt: string;
   workDir?: string | null;
   lastUpdated: Date;
+  archiveState?: ArchiveState;
+  archiveError?: string;
 };
+
+const ARCHIVE_DOT_CLASSES: Record<ArchiveState, string> = {
+  gray: "bg-muted-foreground/40",
+  in_progress: "bg-sky-500 animate-pulse",
+  green: "bg-emerald-500",
+  yellow: "bg-amber-500",
+  red: "bg-red-500",
+};
+
+const ARCHIVE_DOT_LABELS: Record<ArchiveState, string> = {
+  gray: "No memory saved yet",
+  in_progress: "Recording memory…",
+  green: "Memory up to date",
+  yellow: "Has new activity since last memory",
+  red: "Last save failed",
+};
+
+function MemoryStatusDot({
+  state,
+  errorMessage,
+}: {
+  state: ArchiveState;
+  errorMessage?: string;
+}): ReactElement {
+  const label =
+    state === "red" && errorMessage ? errorMessage : ARCHIVE_DOT_LABELS[state];
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          aria-label={label}
+          className={cn(
+            "inline-block size-1.5 shrink-0 rounded-full",
+            ARCHIVE_DOT_CLASSES[state],
+          )}
+        />
+      </TooltipTrigger>
+      <TooltipContent side="top">
+        <span className="text-xs">{label}</span>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
 
 type ViewMode = "list" | "grouped";
 
@@ -96,6 +153,7 @@ type SessionsSidebarProps = {
   onRenameSession?: (id: string, newTitle: string) => Promise<boolean>;
   onArchiveSession?: (id: string) => Promise<boolean>;
   onUnarchiveSession?: (id: string) => Promise<boolean>;
+  onRecordSessionMemory?: (id: string) => Promise<void>;
   onBulkArchiveSessions?: (sessionIds: string[]) => Promise<number>;
   onBulkUnarchiveSessions?: (sessionIds: string[]) => Promise<number>;
   onBulkDeleteSessions?: (sessionIds: string[]) => Promise<number>;
@@ -164,6 +222,7 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
   onRenameSession,
   onArchiveSession,
   onUnarchiveSession,
+  onRecordSessionMemory,
   onBulkArchiveSessions,
   onBulkUnarchiveSessions,
   onBulkDeleteSessions,
@@ -215,6 +274,13 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
 
   // Track if we're in the context menu of an archived session
   const [contextMenuIsArchived, setContextMenuIsArchived] = useState(false);
+
+  // Notice dialog shown when "Record memory" is invoked while archive state
+  // makes the action a no-op (already up-to-date or already in flight).
+  const [recordMemoryNotice, setRecordMemoryNotice] = useState<
+    | { sessionId: string; reason: "in_progress" | "fresh" }
+    | null
+  >(null);
 
   // Multi-select state
   const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
@@ -405,7 +471,7 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
     setContextMenuIsArchived(isArchived);
   };
 
-  const handleMenuAction = async (action: "delete" | "rename" | "archive" | "unarchive" | "select-multiple") => {
+  const handleMenuAction = async (action: "delete" | "rename" | "archive" | "unarchive" | "select-multiple" | "record-memory") => {
     if (!contextMenu) {
       return;
     }
@@ -429,6 +495,8 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
       await onArchiveSession(sessionId);
     } else if (action === "unarchive" && onUnarchiveSession) {
       await onUnarchiveSession(sessionId);
+    } else if (action === "record-memory" && onRecordSessionMemory) {
+      await onRecordSessionMemory(sessionId);
     } else if (action === "select-multiple") {
       setIsMultiSelectMode(true);
       setIsMultiSelectArchived(isArchived);
@@ -536,6 +604,14 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
 
     const hasBulkOperations = onBulkArchiveSessions || onBulkUnarchiveSessions || onBulkDeleteSessions;
 
+    const menuSession = (contextMenuIsArchived ? archivedSessions : sessions).find(
+      (s) => s.id === contextMenu.sessionId,
+    );
+    const recordMemoryState: ArchiveState =
+      menuSession?.archiveState ?? "gray";
+    const recordMemoryBlocked =
+      recordMemoryState === "in_progress" || recordMemoryState === "green";
+
     const menu = (
       <div
         className="fixed z-120 min-w-40 rounded-md border border-border bg-popover p-1 text-sm shadow-md"
@@ -579,6 +655,34 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
           >
             <ArchiveRestore className="size-3.5" />
             Unarchive
+          </button>
+        )}
+        {/* Record memory: summarize this session into the user's recent.jsonl */}
+        {onRecordSessionMemory && (
+          <button
+            className={cn(
+              "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs",
+              recordMemoryBlocked
+                ? "cursor-not-allowed text-muted-foreground opacity-60"
+                : "cursor-pointer hover:bg-accent",
+            )}
+            aria-disabled={recordMemoryBlocked}
+            onClick={() => {
+              if (recordMemoryBlocked) {
+                setRecordMemoryNotice({
+                  sessionId: contextMenu.sessionId,
+                  reason:
+                    recordMemoryState === "in_progress" ? "in_progress" : "fresh",
+                });
+                setContextMenu(null);
+              } else {
+                handleMenuAction("record-memory");
+              }
+            }}
+            type="button"
+          >
+            <BookmarkPlus className="size-3.5" />
+            Record memory
           </button>
         )}
         {/* Show Select Multiple option */}
@@ -924,16 +1028,22 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
                                             className="w-full text-sm font-medium text-foreground bg-background border border-input rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-ring"
                                           />
                                         ) : (
-                                          <Tooltip delayDuration={500}>
-                                            <TooltipTrigger asChild>
-                                              <p className="text-sm font-medium text-foreground truncate">
+                                          <div className="flex items-center gap-2">
+                                            <Tooltip delayDuration={500}>
+                                              <TooltipTrigger asChild>
+                                                <p className="text-sm font-medium text-foreground truncate flex-1">
+                                                  {normalizeTitle(session.title)}
+                                                </p>
+                                              </TooltipTrigger>
+                                              <TooltipContent side="right" className="max-w-md">
                                                 {normalizeTitle(session.title)}
-                                              </p>
-                                            </TooltipTrigger>
-                                            <TooltipContent side="right" className="max-w-md">
-                                              {normalizeTitle(session.title)}
-                                            </TooltipContent>
-                                          </Tooltip>
+                                              </TooltipContent>
+                                            </Tooltip>
+                                            <MemoryStatusDot
+                                              state={session.archiveState ?? "gray"}
+                                              errorMessage={session.archiveError}
+                                            />
+                                          </div>
                                         )}
                                         {!isEditing && (
                                           <span className="text-[10px] text-muted-foreground mt-1 block">
@@ -1055,6 +1165,10 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
                                 {normalizeTitle(session.title)}
                               </TooltipContent>
                             </Tooltip>
+                            <MemoryStatusDot
+                              state={session.archiveState ?? "gray"}
+                              errorMessage={session.archiveError}
+                            />
                             <span className="text-[10px] text-muted-foreground shrink-0">
                               {session.updatedAt}
                             </span>
@@ -1170,6 +1284,10 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
                                           {normalizeTitle(session.title)}
                                         </TooltipContent>
                                       </Tooltip>
+                                      <MemoryStatusDot
+                                        state={session.archiveState ?? "gray"}
+                                        errorMessage={session.archiveError}
+                                      />
                                       <span className="text-[10px] text-muted-foreground shrink-0">
                                         {session.updatedAt}
                                       </span>
@@ -1257,6 +1375,34 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Record-memory blocked notice */}
+      <AlertDialog
+        open={recordMemoryNotice !== null}
+        onOpenChange={(open) => {
+          if (!open) setRecordMemoryNotice(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {recordMemoryNotice?.reason === "in_progress"
+                ? "Memory recording in progress"
+                : "Memory already up to date"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {recordMemoryNotice?.reason === "in_progress"
+                ? "Memory recording is already in progress for this session. Please wait."
+                : "Memory is already up to date. Send a new message in this session before re-recording."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogAction onClick={() => setRecordMemoryNotice(null)}>
+              Got it
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 });

@@ -76,6 +76,36 @@ export async function updateUser(
   return handleResponse<AdminUser>(resp);
 }
 
+export interface KnowledgeIndex {
+  path: string;
+  content: string;
+  exists: boolean;
+}
+
+export async function getKnowledgeIndex(): Promise<KnowledgeIndex> {
+  const resp = await fetch(apiUrl("/api/admin/knowledge/index"), {
+    method: "GET",
+    headers: {
+      ...getAuthHeader(),
+    },
+    credentials: "include",
+  });
+  return handleResponse<KnowledgeIndex>(resp);
+}
+
+export async function setKnowledgeIndex(content: string): Promise<KnowledgeIndex> {
+  const resp = await fetch(apiUrl("/api/admin/knowledge/index"), {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      ...getAuthHeader(),
+    },
+    credentials: "include",
+    body: JSON.stringify({ content }),
+  });
+  return handleResponse<KnowledgeIndex>(resp);
+}
+
 export async function deleteUser(id: string): Promise<void> {
   const resp = await fetch(apiUrl(`/api/admin/users/${encodeURIComponent(id)}`), {
     method: "DELETE",

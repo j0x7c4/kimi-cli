@@ -6,6 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
+from kimi_cli.memory.entry import MemoryEntry
 from kimi_cli.utils.io import atomic_json_write
 from kimi_cli.utils.logging import logger
 
@@ -43,6 +44,9 @@ class SessionState(BaseModel):
     todos: list[TodoItemState] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
     # Multi-user ownership
     owner_id: str | None = None  # user ID of the user who created this session
+    # Session-scoped memory (Layer 3 of the three-layer memory system).
+    # Cleared when the session ends; persistent memory lives outside SessionState.
+    session_memory: list[MemoryEntry] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
 
 
 _LEGACY_METADATA_FILENAME = "metadata.json"

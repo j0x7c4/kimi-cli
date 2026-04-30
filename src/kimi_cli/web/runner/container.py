@@ -13,12 +13,38 @@ Communication model:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+from pathlib import Path
 from uuid import UUID, uuid4
 
 from kimi_cli import logger
+from kimi_cli.memory import resolve_owner_id
 from kimi_cli.utils.subprocess_env import get_clean_env
 from kimi_cli.web.runner.process import KimiCLIRunner, SessionProcess
+
+
+def _read_owner_id_from_disk(session_id: UUID) -> str | None:
+    """Locate the session's ``state.json`` and return its ``owner_id`` field.
+
+    Sessions live under ``$KIMI_SHARE_DIR/sessions/<work_dir_hash>/<session_id>/``;
+    the work-dir hash is unknown to the runner, so we glob across hashes.
+    """
+    share = os.environ.get("KIMI_SHARE_DIR")
+    if not share:
+        return None
+    sessions_root = Path(share) / "sessions"
+    if not sessions_root.is_dir():
+        return None
+    for state_file in sessions_root.glob(f"*/{session_id}/state.json"):
+        try:
+            data = json.loads(state_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        owner = data.get("owner_id")
+        return owner if isinstance(owner, str) else None
+    return None
+
 
 # Environment variable names to forward into sandbox containers
 _SANDBOX_ENV_VARS = [
@@ -204,6 +230,14 @@ class ContainerSessionProcess(SessionProcess):
 
         # Pass session ID so start-sandbox.sh knows which worker to launch
         cmd.extend(["-e", f"KIMI_SESSION_ID={self.session_id}"])
+
+        # Pass user identity so the agent can route per-user private memory
+        # (cross-session highlights / persistent.jsonl) under
+        # ``$KIMI_SHARE_DIR/users/<owner_id>/memory/``.  Sessions without an
+        # authenticated owner fall back to a sentinel so they cannot pollute
+        # real users' data.
+        owner_id_raw = _read_owner_id_from_disk(self.session_id)
+        cmd.extend(["-e", f"KIMI_USER_ID={resolve_owner_id(owner_id_raw)}"])
 
         # Image + entrypoint command (runs start-sandbox.sh which launches
         # Xvfb, kernel server, browser guard, and finally the worker)

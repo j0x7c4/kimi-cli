@@ -7,10 +7,17 @@ import { cn } from "./lib/utils";
 import { ResizablePanel, ResizablePanelGroup } from "./components/ui/resizable";
 import { ChatWorkspaceContainer } from "./features/chat/chat-workspace-container";
 import { SessionsSidebar } from "./features/sessions/sessions";
+import type { ArchiveState } from "./features/sessions/sessions";
 import { CreateSessionDialog } from "./features/sessions/create-session-dialog";
 import { Toaster } from "./components/ui/sonner";
 import { formatRelativeTime } from "./hooks/utils";
 import { useSessions } from "./hooks/useSessions";
+import {
+  archiveSessionMemory,
+  useMemoryEvents,
+  useRecentSummaries,
+} from "./hooks/useMemory";
+import type { MemoryEvent } from "./hooks/useMemory";
 import { useTheme } from "./hooks/use-theme";
 import { ThemeToggle } from "./components/ui/theme-toggle";
 import type { SessionStatus } from "./lib/api/models";
@@ -359,6 +366,125 @@ function App() {
     [setSearchQuery],
   );
 
+  // ----- memory archive state -----
+
+  const { items: recentSummaries, refresh: refreshRecentSummaries } =
+    useRecentSummaries(200);
+
+  // session_id -> max(created_at) (unix seconds)
+  const lastArchivedBySession = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const s of recentSummaries) {
+      const prev = map.get(s.session_id);
+      if (prev === undefined || s.created_at > prev) {
+        map.set(s.session_id, s.created_at);
+      }
+    }
+    return map;
+  }, [recentSummaries]);
+
+  const [archiveInFlight, setArchiveInFlight] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [archiveErrors, setArchiveErrors] = useState<Map<string, string>>(
+    () => new Map(),
+  );
+  // session_id -> startedAt (ms epoch); for the 90s safety timeout
+  const archiveStartedAtRef = useRef<Map<string, number>>(new Map());
+
+  // SSE: completion / failure events from background archive jobs
+  const memoryEventHandler = useCallback(
+    (event: MemoryEvent) => {
+      const sessionId = event.session_id;
+      setArchiveInFlight((prev) => {
+        if (!prev.has(sessionId)) return prev;
+        const next = new Set(prev);
+        next.delete(sessionId);
+        return next;
+      });
+      archiveStartedAtRef.current.delete(sessionId);
+      if (event.type === "archive.completed") {
+        setArchiveErrors((prev) => {
+          if (!prev.has(sessionId)) return prev;
+          const next = new Map(prev);
+          next.delete(sessionId);
+          return next;
+        });
+        refreshRecentSummaries();
+        toast.success("Memory saved");
+      } else {
+        const message = event.error || "Failed to record memory";
+        setArchiveErrors((prev) => new Map(prev).set(sessionId, message));
+        toast.error(message);
+      }
+    },
+    [refreshRecentSummaries],
+  );
+  useMemoryEvents(memoryEventHandler);
+
+  // Periodic refresh so auto-archives (compaction / session_end, which run in
+  // the worker process and don't push to the gateway's SSE bus) surface in
+  // the sidebar dot without a page reload.
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      refreshRecentSummaries();
+    }, 60_000);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        refreshRecentSummaries();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [refreshRecentSummaries]);
+
+  // Safety: if an SSE event never arrives (server crash, lost stream), drop
+  // the session out of in-flight after 90s and mark it failed.
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      const now = Date.now();
+      const stuck: string[] = [];
+      for (const [sid, startedAt] of archiveStartedAtRef.current) {
+        if (now - startedAt > 90_000) {
+          stuck.push(sid);
+        }
+      }
+      if (stuck.length === 0) return;
+      for (const sid of stuck) archiveStartedAtRef.current.delete(sid);
+      setArchiveInFlight((prev) => {
+        let changed = false;
+        const next = new Set(prev);
+        for (const sid of stuck) {
+          if (next.delete(sid)) changed = true;
+        }
+        return changed ? next : prev;
+      });
+      setArchiveErrors((prev) => {
+        const next = new Map(prev);
+        for (const sid of stuck) {
+          next.set(sid, "Timed out waiting for memory recording to complete");
+        }
+        return next;
+      });
+    }, 15_000);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  const deriveArchiveState = useCallback(
+    (sessionId: string, lastUpdated: Date): ArchiveState => {
+      if (archiveInFlight.has(sessionId)) return "in_progress";
+      if (archiveErrors.has(sessionId)) return "red";
+      const archived = lastArchivedBySession.get(sessionId);
+      if (archived === undefined) return "gray";
+      if (lastUpdated.getTime() / 1000 > archived + 2) return "yellow";
+      return "green";
+    },
+    [archiveInFlight, archiveErrors, lastArchivedBySession],
+  );
+
   // Transform Session[] to SessionSummary[] for sidebar
   const sessionSummaries = useMemo(
     () =>
@@ -368,8 +494,10 @@ function App() {
         updatedAt: formatRelativeTime(session.lastUpdated),
         workDir: session.workDir,
         lastUpdated: session.lastUpdated,
+        archiveState: deriveArchiveState(session.sessionId, session.lastUpdated),
+        archiveError: archiveErrors.get(session.sessionId),
       })),
-    [sessions],
+    [sessions, deriveArchiveState, archiveErrors],
   );
 
   // Transform archived Session[] to SessionSummary[] for sidebar
@@ -381,8 +509,10 @@ function App() {
         updatedAt: formatRelativeTime(session.lastUpdated),
         workDir: session.workDir,
         lastUpdated: session.lastUpdated,
+        archiveState: deriveArchiveState(session.sessionId, session.lastUpdated),
+        archiveError: archiveErrors.get(session.sessionId),
       })),
-    [archivedSessions],
+    [archivedSessions, deriveArchiveState, archiveErrors],
   );
 
   const handleForkSession = useCallback(
@@ -391,6 +521,33 @@ function App() {
     },
     [forkSession],
   );
+
+  const handleRecordSessionMemory = useCallback(async (sessionId: string) => {
+    setArchiveErrors((prev) => {
+      if (!prev.has(sessionId)) return prev;
+      const next = new Map(prev);
+      next.delete(sessionId);
+      return next;
+    });
+    setArchiveInFlight((prev) => new Set(prev).add(sessionId));
+    archiveStartedAtRef.current.set(sessionId, Date.now());
+    try {
+      await archiveSessionMemory(sessionId);
+      toast("Recording memory in background…");
+    } catch (e) {
+      const message =
+        e instanceof Error ? e.message : "Failed to start memory recording";
+      setArchiveInFlight((prev) => {
+        if (!prev.has(sessionId)) return prev;
+        const next = new Set(prev);
+        next.delete(sessionId);
+        return next;
+      });
+      archiveStartedAtRef.current.delete(sessionId);
+      setArchiveErrors((prev) => new Map(prev).set(sessionId, message));
+      toast.error(message);
+    }
+  }, []);
 
   // Auth gates: loading, unauthenticated, admin route
   if (isAuthLoading && !currentUser) {
@@ -511,6 +668,7 @@ function App() {
                     onRenameSession={renameSession}
                     onArchiveSession={archiveSession}
                     onUnarchiveSession={unarchiveSession}
+                    onRecordSessionMemory={handleRecordSessionMemory}
                     onBulkArchiveSessions={bulkArchiveSessions}
                     onBulkUnarchiveSessions={bulkUnarchiveSessions}
                     onBulkDeleteSessions={bulkDeleteSessions}
@@ -617,6 +775,7 @@ function App() {
                 onRenameSession={renameSession}
                 onArchiveSession={archiveSession}
                 onUnarchiveSession={unarchiveSession}
+                onRecordSessionMemory={handleRecordSessionMemory}
                 onBulkArchiveSessions={bulkArchiveSessions}
                 onBulkUnarchiveSessions={bulkUnarchiveSessions}
                 onBulkDeleteSessions={bulkDeleteSessions}

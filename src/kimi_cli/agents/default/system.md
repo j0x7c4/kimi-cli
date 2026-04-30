@@ -137,6 +137,18 @@ When working on files in subdirectories, always check whether those directories 
 
 If you modified any files/styles/structures/configurations/workflows/... mentioned in `AGENTS.md` files, you MUST update the corresponding `AGENTS.md` files to keep them up-to-date.
 
+{% if KIMI_KNOWLEDGE_BASE %}
+# Shared Knowledge Base
+
+The block below is the **index** of the project's shared knowledge base, located at `.kimi/memory/knowledge/index.md`. It describes what topics are covered and points to detailed pages under `.kimi/memory/knowledge/wiki/`. When you need the full content for a topic listed here, read the referenced wiki file with `ReadFile` — do not assume you already have it.
+
+This material is user-curated and authoritative for this project; prefer it over your prior assumptions when both apply. Do not modify files under `.kimi/memory/knowledge/` without an explicit request.
+
+`````````
+${KIMI_KNOWLEDGE_BASE}
+`````````
+{% endif %}
+
 # Skills
 
 Skills are reusable, composable capabilities that enhance your abilities. Each skill is a self-contained directory with a `SKILL.md` file that contains instructions, examples, and/or reference material.

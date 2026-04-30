@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -160,6 +162,75 @@ async def delete_user_endpoint(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
+
+
+# ---------------------------------------------------------------------------
+# Knowledge base index editor
+# ---------------------------------------------------------------------------
+
+
+class KnowledgeIndex(BaseModel):
+    path: str
+    content: str
+    exists: bool
+
+
+class WriteKnowledgeIndexRequest(BaseModel):
+    content: str
+
+
+def _admin_knowledge_dir() -> Path:
+    """Resolve the shared knowledge base directory the admin panel manages.
+
+    Mirrors the work_dir defaulting used by session creation: prefer
+    ``KIMI_DEFAULT_WORK_DIR``, falling back to the user's home directory.
+    """
+    default_dir = os.environ.get("KIMI_DEFAULT_WORK_DIR")
+    base = Path(default_dir).expanduser().resolve() if default_dir else Path.home()
+    return base / ".kimi" / "memory" / "knowledge"
+
+
+@router.get("/knowledge/index", summary="Read the shared knowledge index (admin only)")
+async def get_knowledge_index(
+    admin: dict[str, Any] = Depends(require_admin),
+) -> KnowledgeIndex:
+    """Return ``index.md`` from the default work_dir's knowledge base."""
+    path = _admin_knowledge_dir() / "index.md"
+    if not path.is_file():
+        return KnowledgeIndex(path=str(path), content="", exists=False)
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to read {path}: {exc}",
+        ) from exc
+    return KnowledgeIndex(path=str(path), content=content, exists=True)
+
+
+@router.put("/knowledge/index", summary="Write the shared knowledge index (admin only)")
+async def put_knowledge_index(
+    body: WriteKnowledgeIndexRequest,
+    admin: dict[str, Any] = Depends(require_admin),
+) -> KnowledgeIndex:
+    """Overwrite ``index.md`` in the default work_dir's knowledge base."""
+    kb_dir = _admin_knowledge_dir()
+    try:
+        kb_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create {kb_dir}: {exc}",
+        ) from exc
+    path = kb_dir / "index.md"
+    try:
+        path.write_text(body.content, encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to write {path}: {exc}",
+        ) from exc
+    return KnowledgeIndex(path=str(path), content=body.content, exists=True)
 
 
 __all__ = ["router"]

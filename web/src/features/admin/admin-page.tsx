@@ -14,6 +14,7 @@ import type { AdminUser } from "@/lib/api/apis/AdminApi";
 import type { UserInfo } from "@/lib/api/apis/AuthApi";
 import { AdminPluginsPanel } from "./admin-plugins-panel";
 import { AdminBrandingPanel } from "./admin-branding-panel";
+import { AdminKnowledgePanel } from "./admin-knowledge-panel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -43,10 +44,10 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { ArrowLeft, Loader2, Plus, RefreshCw, Trash2, KeyRound, ToggleLeft, ToggleRight, Users, Puzzle, Palette } from "lucide-react";
+import { ArrowLeft, BookOpen, Loader2, Plus, RefreshCw, Trash2, KeyRound, ToggleLeft, ToggleRight, Users, Puzzle, Palette } from "lucide-react";
 import { toast } from "sonner";
 
-type AdminTab = "users" | "plugins" | "branding";
+type AdminTab = "users" | "plugins" | "branding" | "knowledge";
 
 type AdminPageProps = {
   currentUser: UserInfo;
@@ -415,6 +416,19 @@ export function AdminPage({ currentUser }: AdminPageProps) {
             <Palette className="size-3.5" />
             Branding
           </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("knowledge")}
+            className={[
+              "inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+              activeTab === "knowledge"
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground",
+            ].join(" ")}
+          >
+            <BookOpen className="size-3.5" />
+            Knowledge
+          </button>
         </div>
 
         {/* Plugins tab */}
@@ -422,6 +436,9 @@ export function AdminPage({ currentUser }: AdminPageProps) {
 
         {/* Branding tab */}
         {activeTab === "branding" && <AdminBrandingPanel />}
+
+        {/* Knowledge tab */}
+        {activeTab === "knowledge" && <AdminKnowledgePanel />}
 
         {/* Users tab */}
         {activeTab === "users" && (

@@ -677,6 +677,17 @@ def kimi(
                 preserve_background_tasks = True
                 raise
             finally:
+                # --- Cross-session memory archival ---
+                # Fail-open: a slow or broken summarizer must not block the
+                # SessionEnd hook or process exit.
+                with contextlib.suppress(Exception):
+                    from kimi_cli.memory.archivist import archive_on_session_end
+
+                    await asyncio.wait_for(
+                        archive_on_session_end(instance.soul),
+                        timeout=10,
+                    )
+
                 # --- SessionEnd hook ---
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(
