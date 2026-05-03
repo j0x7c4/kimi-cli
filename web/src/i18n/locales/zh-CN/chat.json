@@ -1,0 +1,173 @@
+{
+  "attachFiles": "附加文件",
+  "planMode": {
+    "label": "Plan",
+    "toggle": "切换 Plan 模式",
+    "active": "Plan 模式已启用。模型只会读取与规划，不会修改文件。",
+    "enable": "启用 Plan 模式以进行只读的调研与规划。"
+  },
+  "approval": {
+    "allowAction": "允许此 {{action}} 吗？",
+    "sessionApproved": "本会话已授权。后续匹配的请求将自动通过。",
+    "approvalConfirmed": "已确认授权，继续执行…",
+    "requestDenied": "请求已拒绝",
+    "requestDeniedWithReason": "请求已拒绝：{{reason}}",
+    "waitingApproval": "等待你的确认…",
+    "executionCancelled": "工具执行已取消。",
+    "approve": "同意",
+    "approving": "处理中...",
+    "approveForSession": "本会话内同意",
+    "decline": "拒绝",
+    "declining": "拒绝中...",
+    "declineWithFeedback": "拒绝并反馈",
+    "cancelFeedback": "取消反馈",
+    "submitFeedback": "提交反馈",
+    "feedbackPlaceholder": "告诉模型应该怎么做……",
+    "feedbackHint": "回车提交 · Shift+回车换行 · Esc 取消",
+    "manualRequiredBy": "{{sender}} 需要人工审批",
+    "actionLabel": "操作：",
+    "confirming": "确认中…",
+    "approvingSession": "授权会话中…"
+  },
+  "activity": {
+    "uploadingFiles": "正在上传文件...",
+    "errorFallback": "出错了",
+    "connecting": "正在连接...",
+    "waitingApproval": "等待确认...",
+    "loadingHistory": "正在加载历史...",
+    "thinking": "思考中...",
+    "awaitingInput": "等待输入",
+    "runningTool": "正在运行 {{tool}}...",
+    "tools": {
+      "Read": "正在读取文件...",
+      "Write": "正在写入文件...",
+      "Edit": "正在编辑代码...",
+      "Bash": "正在运行命令...",
+      "Glob": "正在查找文件...",
+      "Grep": "正在搜索内容...",
+      "WebFetch": "正在获取网页内容...",
+      "WebSearch": "正在搜索网络...",
+      "Task": "正在运行代理...",
+      "NotebookEdit": "正在编辑 notebook..."
+    }
+  },
+  "composer": {
+    "placeholderNoSession": "请先创建会话…",
+    "placeholderConnecting": "正在连接…",
+    "placeholderStarting": "正在启动环境…",
+    "placeholderFollowUp": "继续追问…",
+    "placeholderDefault": "随便问问，/ 唤出指令，@ 提及文件",
+    "uploadingBadge": "正在上传文件…",
+    "expandInput": "展开输入框",
+    "collapseInput": "收起输入框",
+    "stopGeneration": "停止生成",
+    "queueMessage": "排队发送"
+  },
+  "header": {
+    "openSidebar": "打开会话侧边栏",
+    "doubleClickRename": "双击重命名",
+    "showFiles": "显示工作区文件",
+    "hideFiles": "隐藏工作区文件",
+    "searchMessages": "搜索消息",
+    "foldAll": "折叠所有块",
+    "unfoldAll": "展开所有块"
+  },
+  "conversation": {
+    "startingEnv": "正在启动环境…",
+    "connectingSession": "正在连接会话…",
+    "createSessionTitle": "创建会话以开始",
+    "createSessionHint": "点击侧边栏的 + 按钮新建会话",
+    "createNewSession": "新建会话",
+    "newTabHint": "{{modifier}}+点击在新标签页打开",
+    "startConversation": "在下方输入消息开始对话。"
+  },
+  "files": {
+    "title": "工作区文件",
+    "currentWorkDir": "当前工作目录",
+    "refresh": "刷新工作区文件",
+    "close": "关闭工作区文件面板",
+    "up": "上一级",
+    "root": "根目录",
+    "loading": "正在加载文件...",
+    "loadFailed": "加载工作区文件失败",
+    "loadDirFailed": "加载此目录失败",
+    "tryAgain": "重试",
+    "emptyDir": "此目录下没有文件。",
+    "directory": "目录",
+    "fileLabel": "文件",
+    "openDir": "打开目录 {{name}}",
+    "download": "下载 {{name}}"
+  },
+  "mentions": {
+    "pendingUploads": "待上传",
+    "workspaceFiles": "工作区文件",
+    "uploadBadge": "上传",
+    "workspaceBadge": "工作区",
+    "noMatch": "没有匹配 \"@{{query}}\" 的文件。",
+    "noFiles": "暂时还没有可提及的文件。",
+    "indexing": "正在索引工作区文件…",
+    "unavailable": "工作区文件不可用。",
+    "retry": "重试",
+    "selectSession": "选择一个活跃会话以启用工作区文件提及。",
+    "filesReady_one": "{{count}} 个文件可被提及。",
+    "filesReady_other": "{{count}} 个文件可被提及。",
+    "workspaceIndexed": "工作区文件已索引。",
+    "searchDeeperHint": " 输入路径以深入搜索。"
+  },
+  "commands": {
+    "heading": "斜杠命令",
+    "noMatch": "没有匹配 \"/{{query}}\" 的命令。",
+    "empty": "暂无可用命令。"
+  },
+  "search": {
+    "placeholder": "在会话中搜索…",
+    "resultCount_one": "{{count}} 条结果",
+    "resultCount_other": "{{count}} 条结果",
+    "noResults": "无结果",
+    "noMessages": "未找到消息",
+    "jumpToMessage": "跳转到消息",
+    "selectResult": "选择一项查看预览",
+    "typeToSearch": "输入开始搜索",
+    "navigate": "切换",
+    "close": "关闭",
+    "title": "搜索消息",
+    "messageLabel": {
+      "user": "用户",
+      "assistant": "助手",
+      "thinking": "思考"
+    },
+    "preview": {
+      "content": "内容",
+      "thinking": "思考",
+      "tool": "工具",
+      "input": "输入",
+      "output": "输出",
+      "message": "消息",
+      "code": "代码"
+    }
+  },
+  "openIn": {
+    "noDirectory": "无目录",
+    "pathCopied": "已复制路径",
+    "copyFailed": "复制路径失败",
+    "noWorkDir": "无工作目录",
+    "noWorkDirDesc": "请先创建带工作目录的会话。",
+    "openWorkDir": "打开工作目录",
+    "open": "打开",
+    "openInLabel": "在 {{label}} 中打开",
+    "openInLabelLastUsed": "{{label}}（上次使用）",
+    "openFailed": "打开应用失败",
+    "unexpectedError": "未知错误",
+    "chooseApp": "选择打开工作目录的应用",
+    "lastUsed": "上次使用",
+    "copyPath": "复制路径"
+  },
+  "sessionInfo": {
+    "title": "会话信息",
+    "sessionId": "会话 ID",
+    "workingDirectory": "工作目录",
+    "sessionDirectory": "会话目录",
+    "info": "会话信息",
+    "copy": "复制{{label}}"
+  }
+}

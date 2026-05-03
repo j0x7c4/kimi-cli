@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
 import { cn } from "@/lib/utils";
 import type { ApprovalResponseDecision } from "@/hooks/wireTypes";
 import type { LiveMessage } from "@/hooks/types";
+import { translateBackendMessage } from "@/lib/translate-backend";
 
 type ApprovalDialogProps = {
   messages: LiveMessage[];
@@ -22,6 +24,7 @@ export function ApprovalDialog({
   pendingApprovalMap,
   canRespondToApproval,
 }: ApprovalDialogProps) {
+  const { t } = useTranslation(["chat"]);
   const [feedbackMode, setFeedbackMode] = useState(false);
   const [feedbackText, setFeedbackText] = useState("");
   const feedbackInputRef = useRef<HTMLTextAreaElement>(null);
@@ -184,7 +187,7 @@ export function ApprovalDialog({
           <div className="flex items-center gap-2">
             <div className="size-2 rounded-full bg-blue-400 animate-pulse flex-shrink-0" />
             <div className="font-semibold text-sm text-foreground">
-              Allow this {approval.action}?
+              {t("chat:approval.allowAction", { action: approval.action })}
             </div>
             {approval.sender && (
               <span className="text-xs text-muted-foreground">
@@ -202,7 +205,7 @@ export function ApprovalDialog({
           {approval.description && (
             <div className="rounded-md bg-muted/50 px-3 py-2 w-full max-h-44 overflow-auto">
               <pre className="font-mono text-xs whitespace-pre-wrap text-foreground/90">
-                {approval.description}
+                {translateBackendMessage(approval.description, t)}
               </pre>
             </div>
           )}
@@ -245,7 +248,9 @@ export function ApprovalDialog({
               onClick={() => handleResponse("approve")}
               className="transition-all"
             >
-              {approvalPending ? "Approving..." : "Approve"}
+              {approvalPending
+                ? t("chat:approval.approving")
+                : t("chat:approval.approve")}
               {!approvalPending && <Kbd className="ml-1.5">1</Kbd>}
             </Button>
             <Button
@@ -255,7 +260,9 @@ export function ApprovalDialog({
               onClick={() => handleResponse("approve_for_session")}
               className="transition-all"
             >
-              {approvalPending ? "Approving..." : "Approve for session"}
+              {approvalPending
+                ? t("chat:approval.approving")
+                : t("chat:approval.approveForSession")}
               {!approvalPending && <Kbd className="ml-1.5">2</Kbd>}
             </Button>
             <Button
@@ -268,7 +275,9 @@ export function ApprovalDialog({
                 "text-muted-foreground hover:text-destructive hover:bg-destructive/10",
               )}
             >
-              {approvalPending ? "Declining..." : "Decline"}
+              {approvalPending
+                ? t("chat:approval.declining")
+                : t("chat:approval.decline")}
               {!approvalPending && <Kbd className="ml-1.5">3</Kbd>}
             </Button>
             <Button
@@ -283,7 +292,9 @@ export function ApprovalDialog({
                   : "text-muted-foreground hover:text-foreground",
               )}
             >
-              {feedbackMode ? "Cancel feedback" : "Decline with feedback"}
+              {feedbackMode
+                ? t("chat:approval.cancelFeedback")
+                : t("chat:approval.declineWithFeedback")}
               {!(feedbackMode || approvalPending) && (
                 <Kbd className="ml-1.5">4</Kbd>
               )}
@@ -310,7 +321,7 @@ export function ApprovalDialog({
                     setFeedbackText("");
                   }
                 }}
-                placeholder="Tell the model what to do instead..."
+                placeholder={t("chat:approval.feedbackPlaceholder")}
                 className={cn(
                   "w-full rounded-md border border-border/60 bg-muted/30",
                   "px-3 py-2 text-sm text-foreground",
@@ -322,7 +333,7 @@ export function ApprovalDialog({
               />
               <div className="flex items-center justify-between">
                 <span className="text-xs text-muted-foreground">
-                  Enter to submit · Shift+Enter for newline · Esc to cancel
+                  {t("chat:approval.feedbackHint")}
                 </span>
                 <Button
                   size="sm"
@@ -331,7 +342,7 @@ export function ApprovalDialog({
                   onClick={handleFeedbackSubmit}
                   className="text-xs"
                 >
-                  Submit feedback
+                  {t("chat:approval.submitFeedback")}
                 </Button>
               </div>
             </div>

@@ -1,7 +1,10 @@
 import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { cn } from "@/lib/utils";
 import type { ApprovalResponseDecision } from "@/hooks/wireTypes";
 import type { LiveMessage } from "@/hooks/types";
+import { translateBackendMessage } from "@/lib/translate-backend";
 import {
   ChainOfThought,
   ChainOfThoughtContent,
@@ -59,6 +62,7 @@ export function AssistantMessage({
   canRespondToApproval,
   blocksExpanded,
 }: AssistantMessageProps) {
+  const { t } = useTranslation(["chat"]);
   const content = useMemo(() => {
     switch (message.variant) {
       case "chain-of-thought":
@@ -70,6 +74,7 @@ export function AssistantMessage({
           onApprovalAction,
           canRespondToApproval,
           blocksExpanded,
+          t,
         });
       case "code":
         return renderCodeMessage(message);
@@ -84,6 +89,7 @@ export function AssistantMessage({
     onApprovalAction,
     canRespondToApproval,
     blocksExpanded,
+    t,
   ]);
 
   return content;
@@ -168,12 +174,14 @@ const renderToolMessage = ({
   onApprovalAction,
   canRespondToApproval,
   blocksExpanded,
+  t,
 }: {
   message: LiveMessage;
   pendingApprovalMap: Record<string, boolean>;
   onApprovalAction?: AssistantApprovalHandler;
   canRespondToApproval: boolean;
   blocksExpanded: boolean;
+  t: TFunction;
 }) => {
   const toolCall = message.toolCall;
   if (!toolCall) {
@@ -248,17 +256,21 @@ const renderToolMessage = ({
               className="rounded-md bg-muted/30 px-3 py-2.5 text-sm"
             >
               <ConfirmationTitle>
-                Manual approval required by {approval.sender}
+                {t("chat:approval.manualRequiredBy", {
+                  sender: approval.sender,
+                })}
               </ConfirmationTitle>
               <ConfirmationRequest>
                 <div className="text-sm text-muted-foreground">
                   <p>
-                    <span className="font-medium text-foreground">Action:</span>{" "}
+                    <span className="font-medium text-foreground">
+                      {t("chat:approval.actionLabel")}
+                    </span>{" "}
                     {approval.action}
                   </p>
                   {approval.description ? (
                     <p className="mt-2 text-foreground">
-                      {approval.description}
+                      {translateBackendMessage(approval.description, t)}
                     </p>
                   ) : null}
                 </div>
@@ -270,7 +282,9 @@ const renderToolMessage = ({
                     }
                     variant="outline"
                   >
-                    {approvalPending ? "Declining…" : "Decline"}
+                    {approvalPending
+                      ? t("chat:approval.declining")
+                      : t("chat:approval.decline")}
                   </ConfirmationAction>
                   <ConfirmationAction
                     disabled={disableApprovalActions}
@@ -278,7 +292,9 @@ const renderToolMessage = ({
                       approval && onApprovalAction?.(approval, "approve")
                     }
                   >
-                    {approvalPending ? "Confirming…" : "Approve"}
+                    {approvalPending
+                      ? t("chat:approval.confirming")
+                      : t("chat:approval.approve")}
                   </ConfirmationAction>
                   <ConfirmationAction
                     disabled={disableApprovalActions}
@@ -290,22 +306,25 @@ const renderToolMessage = ({
                     className="hover:bg-primary/30"
                   >
                     {approvalPending
-                      ? "Approving session…"
-                      : "Approve for session"}
+                      ? t("chat:approval.approvingSession")
+                      : t("chat:approval.approveForSession")}
                   </ConfirmationAction>
                 </ConfirmationActions>
               </ConfirmationRequest>
               <ConfirmationAccepted>
                 <div className="rounded-md bg-success/10 px-3 py-2 text-xs text-success">
                   {approvalResponse === "approve_for_session"
-                    ? "Session approved. Future matching requests auto-approve."
-                    : "Approval confirmed. Continuing execution…"}
+                    ? t("chat:approval.sessionApproved")
+                    : t("chat:approval.approvalConfirmed")}
                 </div>
               </ConfirmationAccepted>
               <ConfirmationRejected>
                 <div className="rounded-md bg-warning/10 px-3 py-2 text-xs text-warning">
-                  Request denied
-                  {approval.reason ? `: ${approval.reason}` : "."}
+                  {approval.reason
+                    ? t("chat:approval.requestDeniedWithReason", {
+                        reason: approval.reason,
+                      })
+                    : `${t("chat:approval.requestDenied")}.`}
                 </div>
               </ConfirmationRejected>
             </Confirmation>
@@ -313,9 +332,13 @@ const renderToolMessage = ({
         </ToolContent>
       </Tool>
       {isApprovalRequested ? (
-        <div className={assistantMetaTextClass}>Waiting for your approval…</div>
+        <div className={assistantMetaTextClass}>
+          {t("chat:approval.waitingApproval")}
+        </div>
       ) : isApprovalDenied ? (
-        <div className={assistantMetaTextClass}>Tool execution cancelled.</div>
+        <div className={assistantMetaTextClass}>
+          {t("chat:approval.executionCancelled")}
+        </div>
       ) : null}
     </>
   );

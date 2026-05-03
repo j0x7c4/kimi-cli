@@ -1,4 +1,5 @@
 import { useCallback, useMemo, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 import {
   ChevronDownIcon,
   CopyIcon,
@@ -81,9 +82,10 @@ const ICON_MAP: Record<string, ReactNode> = {
 };
 
 export function OpenInMenu({ workDir, className }: OpenInMenuProps) {
+  const { t } = useTranslation("chat");
   const isMac = isMacOS();
   const hasWorkDir = Boolean(workDir && workDir.trim().length > 0);
-  const displayPath = workDir ? compactPath(workDir) : "No directory";
+  const displayPath = workDir ? compactPath(workDir) : t("openIn.noDirectory");
 
   const menuTargets = useMemo<OpenTarget[]>(
     () =>
@@ -107,18 +109,18 @@ export function OpenInMenu({ workDir, className }: OpenInMenuProps) {
     }
     try {
       await navigator.clipboard.writeText(workDir);
-      toast.success("Path copied", { description: workDir });
+      toast.success(t("openIn.pathCopied"), { description: workDir });
     } catch (error) {
       console.error("Failed to copy path:", error);
-      toast.error("Failed to copy path");
+      toast.error(t("openIn.copyFailed"));
     }
-  }, [workDir]);
+  }, [workDir, t]);
 
   const handleOpenTarget = useCallback(
     async (target: OpenTarget) => {
       if (!workDir) {
-        toast.message("No working directory", {
-          description: "Create a session with a working directory first.",
+        toast.message(t("openIn.noWorkDir"), {
+          description: t("openIn.noWorkDirDesc"),
         });
         return;
       }
@@ -127,13 +129,15 @@ export function OpenInMenu({ workDir, className }: OpenInMenuProps) {
         setLastOpenTargetId(target.id);
       } catch (error) {
         console.error("Failed to open external URL:", error);
-        toast.error("Failed to open application", {
+        toast.error(t("openIn.openFailed"), {
           description:
-            error instanceof Error ? error.message : "Unexpected error",
+            error instanceof Error
+              ? error.message
+              : t("openIn.unexpectedError"),
         });
       }
     },
-    [workDir],
+    [workDir, t],
   );
 
   if (!isMac) {
@@ -143,7 +147,7 @@ export function OpenInMenu({ workDir, className }: OpenInMenuProps) {
   return (
     <ButtonGroup
       className={cn("h-8 items-center", className)}
-      aria-label="Open working directory"
+      aria-label={t("openIn.openWorkDir")}
     >
       <Tooltip>
         <TooltipTrigger asChild>
@@ -173,14 +177,14 @@ export function OpenInMenu({ workDir, className }: OpenInMenuProps) {
               size="sm"
               disabled={!hasWorkDir}
               className="h-8 px-2 text-xs"
-              aria-label={`Open in ${lastTarget.label}`}
+              aria-label={t("openIn.openInLabel", { label: lastTarget.label })}
               onClick={() => handleOpenTarget(lastTarget)}
             >
-              Open
+              {t("openIn.open")}
             </Button>
           </TooltipTrigger>
           <TooltipContent side="bottom">
-            Open in {lastTarget.label}
+            {t("openIn.openInLabel", { label: lastTarget.label })}
           </TooltipContent>
         </Tooltip>
       ) : null}
@@ -192,9 +196,9 @@ export function OpenInMenu({ workDir, className }: OpenInMenuProps) {
             size="sm"
             disabled={!hasWorkDir}
             className="h-8 px-2 text-xs"
-            aria-label="Choose app to open working directory"
+            aria-label={t("openIn.chooseApp")}
           >
-            {!lastTarget && "Open"}
+            {!lastTarget && t("openIn.open")}
             <ChevronDownIcon className="size-3" />
           </Button>
         </DropdownMenuTrigger>
@@ -205,7 +209,7 @@ export function OpenInMenu({ workDir, className }: OpenInMenuProps) {
               onSelect={() => handleOpenTarget(target)}
               aria-label={
                 target.id === lastTargetId
-                  ? `${target.label} (last used)`
+                  ? t("openIn.openInLabelLastUsed", { label: target.label })
                   : target.label
               }
             >
@@ -213,7 +217,7 @@ export function OpenInMenu({ workDir, className }: OpenInMenuProps) {
               <span>{target.label}</span>
               {target.id === lastTargetId && (
                 <span className="ml-auto text-[10px] text-muted-foreground">
-                  Last used
+                  {t("openIn.lastUsed")}
                 </span>
               )}
             </DropdownMenuItem>
@@ -221,7 +225,7 @@ export function OpenInMenu({ workDir, className }: OpenInMenuProps) {
           <DropdownMenuSeparator />
           <DropdownMenuItem onSelect={handleCopyPath}>
             <CopyIcon className="size-4" />
-            <span>Copy path</span>
+            <span>{t("openIn.copyPath")}</span>
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

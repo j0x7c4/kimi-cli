@@ -1,0 +1,17 @@
+{
+  "exact": {
+    "Session Error": "会话错误",
+    "Memory saved": "记忆已保存"
+  },
+  "bgTask": {
+    "completed": "后台任务已完成：{{desc}}",
+    "failed": "后台任务失败：{{desc}}",
+    "timedOut": "后台任务超时：{{desc}}",
+    "killed": "后台任务已终止：{{desc}}",
+    "lost": "后台任务已丢失：{{desc}}"
+  },
+  "approval": {
+    "rejected": "工具调用已被用户拒绝。用户不允许该工具调用继续执行。",
+    "rejectedWithFeedback": "已拒绝：{{feedback}}"
+  }
+}

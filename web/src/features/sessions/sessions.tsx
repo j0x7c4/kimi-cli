@@ -31,6 +31,7 @@ import {
   BookmarkPlus,
 } from "lucide-react";
 import { Virtuoso } from "react-virtuoso";
+import { useTranslation } from "react-i18next";
 import { KimiCliBrand } from "@/components/kimi-cli-brand";
 import {
   Dialog,
@@ -89,14 +90,6 @@ const ARCHIVE_DOT_CLASSES: Record<ArchiveState, string> = {
   red: "bg-red-500",
 };
 
-const ARCHIVE_DOT_LABELS: Record<ArchiveState, string> = {
-  gray: "No memory saved yet",
-  in_progress: "Recording memory…",
-  green: "Memory up to date",
-  yellow: "Has new activity since last memory",
-  red: "Last save failed",
-};
-
 function MemoryStatusDot({
   state,
   errorMessage,
@@ -104,8 +97,9 @@ function MemoryStatusDot({
   state: ArchiveState;
   errorMessage?: string;
 }): ReactElement {
+  const { t } = useTranslation("sessions");
   const label =
-    state === "red" && errorMessage ? errorMessage : ARCHIVE_DOT_LABELS[state];
+    state === "red" && errorMessage ? errorMessage : t(`archive.${state}`);
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -242,6 +236,7 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
   onCreateSessionInDir,
   onClose,
 }: SessionsSidebarProps): ReactElement {
+  const { t } = useTranslation("sessions");
   const minimumSpinMs = 600;
   const normalizeTitle = useCallback((t: string) => {
     // Split by any newline, join with space, then collapse whitespace
@@ -633,7 +628,7 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
             type="button"
           >
             <Pencil className="size-3.5" />
-            Rename
+            {t("action.rename")}
           </button>
         )}
         {/* Show Archive for non-archived sessions */}
@@ -644,7 +639,7 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
             type="button"
           >
             <Archive className="size-3.5" />
-            Archive
+            {t("action.archive")}
           </button>
         )}
         {/* Show Unarchive for archived sessions */}
@@ -655,7 +650,7 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
             type="button"
           >
             <ArchiveRestore className="size-3.5" />
-            Unarchive
+            {t("action.unarchive")}
           </button>
         )}
         {/* Record memory: summarize this session into the user's recent.jsonl */}
@@ -683,7 +678,7 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
             type="button"
           >
             <BookmarkPlus className="size-3.5" />
-            Record memory
+            {t("action.record_memory")}
           </button>
         )}
         {/* Show Select Multiple option */}
@@ -694,7 +689,7 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
             type="button"
           >
             <CheckSquare className="size-3.5" />
-            Select Multiple
+            {t("action.select_multiple")}
           </button>
         )}
         <button
@@ -703,7 +698,7 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
           type="button"
         >
           <Trash2 className="size-3.5" />
-          Delete session
+          {t("action.delete")}
         </button>
       </div>
     );
@@ -767,7 +762,7 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
                 </TooltipTrigger>
                 <TooltipContent className="flex flex-col items-center gap-1" side="bottom">
                   <div className="flex items-center gap-2">
-                    <span>New session</span>
+                    <span>{t('create.tooltip.title1')}</span>
                     <KbdGroup>
                       <Kbd>Shift</Kbd>
                       <span className="text-muted-foreground">+</span>
@@ -777,7 +772,7 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
                     </KbdGroup>
                   </div>
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <span>{newSessionShortcutModifier}+Click to open in new tab</span>
+                    <span>{newSessionShortcutModifier}+{t('create.tooltip.body')}</span>
                   </div>
                 </TooltipContent>
               </Tooltip>
@@ -826,7 +821,7 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
                           )}
                         </button>
                       </TooltipTrigger>
-                      <TooltipContent side="bottom">Unarchive</TooltipContent>
+                      <TooltipContent side="bottom">{t('action.unarchive')}</TooltipContent>
                     </Tooltip>
                   )
                 ) : (
@@ -846,7 +841,7 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
                           )}
                         </button>
                       </TooltipTrigger>
-                      <TooltipContent side="bottom">Archive</TooltipContent>
+                      <TooltipContent side="bottom">{t("action.archive")}</TooltipContent>
                     </Tooltip>
                   )
                 )}
@@ -867,7 +862,7 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
                         )}
                       </button>
                     </TooltipTrigger>
-                    <TooltipContent side="bottom">Delete</TooltipContent>
+                    <TooltipContent side="bottom">{t("action.delete")}</TooltipContent>
                   </Tooltip>
                 )}
                 {/* Divider */}
@@ -897,7 +892,7 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
               <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
               <input
                 type="text"
-                placeholder="Search sessions..."
+                placeholder={t("search.placeholder")}
                 value={sessionSearch}
                 onChange={(e) => setSessionSearch(e.target.value)}
                 className="h-8 w-full rounded-md border border-input bg-background pl-8 pr-8 text-xs placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
@@ -983,8 +978,8 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
                                   </button>
                                 </TooltipTrigger>
                                 <TooltipContent className="flex flex-col items-center gap-1" side="right">
-                                  <span>New session here</span>
-                                  <span className="text-xs text-muted-foreground">{newSessionShortcutModifier}+Click to open in new tab</span>
+                                  <span>{t("create.tooltip.title2")}</span>
+                                  <span className="text-xs text-muted-foreground">{newSessionShortcutModifier}+{t('create.tooltip.body')}</span>
                                 </TooltipContent>
                               </Tooltip>
                             )}
@@ -1217,7 +1212,7 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
                   <CollapsibleTrigger className="flex w-full items-center gap-2 px-3 py-2 text-xs text-muted-foreground hover:text-foreground rounded-lg hover:bg-muted/50 group">
                     <ChevronDown className="size-3 transition-transform group-data-[state=closed]:-rotate-90" />
                     <Archive className="size-3.5" />
-                    <span className="flex-1 text-left font-medium">Archived</span>
+                    <span className="flex-1 text-left font-medium">{t("archived.title")}</span>
                     <span className="text-[10px] text-muted-foreground/70 bg-muted px-1.5 py-0.5 rounded">
                       {archivedSessions.length}{hasMoreArchivedSessions ? '+' : ''}
                     </span>
@@ -1228,7 +1223,7 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
                         <Loader2 className="size-4 animate-spin text-muted-foreground" />
                       </div>
                     ) : archivedSessions.length === 0 ? (
-                      <p className="px-3 py-3 text-xs text-muted-foreground">No archived sessions</p>
+                      <p className="px-3 py-3 text-xs text-muted-foreground">{t("archived.label_no")}</p>
                     ) : (
                       <div className="space-y-1 px-1 pb-2 max-h-[50vh] overflow-y-auto">
                         <ul className="space-y-1">
@@ -1359,19 +1354,18 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-destructive">
               <AlertTriangle className="size-5" />
-              Delete Session
+              {t('delete_dialog.title')}
             </DialogTitle>
             <DialogDescription>
-              Are you sure you want to delete <strong className="text-foreground">{deleteConfirm.sessionTitle}</strong>?
-              This action cannot be undone.
+              {t('delete_dialog.body', {name:deleteConfirm.sessionTitle})}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="gap-2 w-full justify-end">
             <Button variant="outline" onClick={handleCancelDelete}>
-              Cancel
+              {t('delete_dialog.cancel')}
             </Button>
             <Button variant="destructive" onClick={handleConfirmDelete}>
-              Delete
+              {t('delete_dialog.confirm')}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1388,18 +1382,18 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
           <AlertDialogHeader>
             <AlertDialogTitle>
               {recordMemoryNotice?.reason === "in_progress"
-                ? "Memory recording in progress"
-                : "Memory already up to date"}
+                ? t("memory.in_progress_dialog.title")
+                : t("memory.up_to_date_dialog.title")}
             </AlertDialogTitle>
             <AlertDialogDescription>
               {recordMemoryNotice?.reason === "in_progress"
-                ? "Memory recording is already in progress for this session. Please wait."
-                : "Memory is already up to date. Send a new message in this session before re-recording."}
+                ? t("memory.in_progress_dialog.body")
+                : t("memory.up_to_date_dialog.body")}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogAction onClick={() => setRecordMemoryNotice(null)}>
-              Got it
+              {t("memory.confirm")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -1,5 +1,6 @@
 import { memo, type ReactElement } from "react";
 import type { ChatStatus } from "ai";
+import type { TFunction } from "i18next";
 import { AnimatePresence, motion } from "motion/react";
 import { Loader } from "@/components/ai-elements/loader";
 import type { LiveMessage } from "@/hooks/types";
@@ -16,18 +17,18 @@ export type ActivityDetail = {
 
 // --- Tool Name Mapping ---
 
-const TOOL_DISPLAY_NAMES: Record<string, string> = {
-  Read: "Reading files...",
-  Write: "Writing files...",
-  Edit: "Editing code...",
-  Bash: "Running command...",
-  Glob: "Searching files...",
-  Grep: "Searching content...",
-  WebFetch: "Fetching web content...",
-  WebSearch: "Searching the web...",
-  Task: "Running agent...",
-  NotebookEdit: "Editing notebook...",
-};
+const KNOWN_TOOLS = new Set([
+  "Read",
+  "Write",
+  "Edit",
+  "Bash",
+  "Glob",
+  "Grep",
+  "WebFetch",
+  "WebSearch",
+  "Task",
+  "NotebookEdit",
+]);
 
 // --- Status Derivation ---
 
@@ -38,6 +39,7 @@ type DeriveActivityStatusParams = {
   isUploadingFiles: boolean;
   messages: LiveMessage[];
   errorMessage?: string | null;
+  t: TFunction;
 };
 
 /**
@@ -50,12 +52,13 @@ export function deriveActivityStatus({
   isUploadingFiles,
   messages,
   errorMessage,
+  t,
 }: DeriveActivityStatusParams): ActivityDetail {
   // Check for pending approval requests (search from end for efficiency)
   if (findPendingApproval(messages)) {
     return {
       status: "waiting_input",
-      description: "Waiting for approval...",
+      description: t("chat:activity.waitingApproval"),
     };
   }
 
@@ -63,7 +66,7 @@ export function deriveActivityStatus({
   if (isUploadingFiles) {
     return {
       status: "processing",
-      description: "Uploading files...",
+      description: t("chat:activity.uploadingFiles"),
     };
   }
 
@@ -71,7 +74,7 @@ export function deriveActivityStatus({
   if (chatStatus === "error") {
     return {
       status: "error",
-      description: errorMessage || "An error occurred",
+      description: errorMessage || t("chat:activity.errorFallback"),
     };
   }
 
@@ -79,7 +82,7 @@ export function deriveActivityStatus({
   if (chatStatus === "submitted" || isAwaitingFirstResponse) {
     return {
       status: "connecting",
-      description: "Connecting...",
+      description: t("chat:activity.connecting"),
     };
   }
 
@@ -89,7 +92,7 @@ export function deriveActivityStatus({
     if (isReplayingHistory) {
       return {
         status: "processing",
-        description: "Loading history...",
+        description: t("chat:activity.loadingHistory"),
       };
     }
 
@@ -98,7 +101,9 @@ export function deriveActivityStatus({
 
     if (activeToolCall) {
       const toolName = extractToolName(activeToolCall);
-      const displayText = TOOL_DISPLAY_NAMES[toolName] || `Running ${toolName}...`;
+      const displayText = KNOWN_TOOLS.has(toolName)
+        ? t(`chat:activity.tools.${toolName}`)
+        : t("chat:activity.runningTool", { tool: toolName });
       return {
         status: "processing",
         description: displayText,
@@ -108,14 +113,14 @@ export function deriveActivityStatus({
     // No active tool call - model is thinking
     return {
       status: "processing",
-      description: "Thinking...",
+      description: t("chat:activity.thinking"),
     };
   }
 
   // Default idle state
   return {
     status: "idle",
-    description: "Awaiting input",
+    description: t("chat:activity.awaitingInput"),
   };
 }
 

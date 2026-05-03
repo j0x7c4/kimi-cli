@@ -1,4 +1,5 @@
 import { useCallback, useState, type ReactElement } from "react";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { Check, Cpu, Paperclip, RefreshCcw } from "lucide-react";
 import { usePromptInputAttachments } from "@ai-elements";
@@ -37,6 +38,7 @@ export function GlobalConfigControls({
 }: GlobalConfigControlsProps): ReactElement {
   const { config, isLoading, isUpdating, error, refresh, update } =
     useGlobalConfig();
+  const { t } = useTranslation(["toasts", "config", "chat"]);
 
   const [isSelectorOpen, setIsSelectorOpen] = useState(false);
   const [lastBusySkip, setLastBusySkip] = useState<string[] | null>(null);
@@ -54,28 +56,32 @@ export function GlobalConfigControls({
         const skippedBusy = resp.skippedBusySessionIds ?? [];
 
         if (restarted.length > 0) {
-          toast.success("Global model updated", {
-            description: `Restarted ${restarted.length} running session(s).`,
+          toast.success(t("toasts:globalModel.successTitle"), {
+            description: t("toasts:globalModel.successDesc", {
+              count: restarted.length,
+            }),
           });
         } else {
-          toast.success("Global model updated");
+          toast.success(t("toasts:globalModel.successTitle"));
         }
 
         if (skippedBusy.length > 0) {
           setLastBusySkip(skippedBusy);
-          toast.message("Some sessions were skipped (busy)", {
-            description: `Skipped ${skippedBusy.length} busy session(s). You can retry when they are idle, or force restart.`,
+          toast.message(t("toasts:globalModel.busyTitle"), {
+            description: t("toasts:globalModel.busyDesc", {
+              count: skippedBusy.length,
+            }),
           });
         } else {
           setLastBusySkip(null);
         }
       } catch (err) {
         const message =
-          err instanceof Error ? err.message : "Failed to update global model";
-        toast.error("Failed to update global model", { description: message });
+          err instanceof Error ? err.message : t("toasts:globalModel.fallbackError");
+        toast.error(t("toasts:globalModel.errorTitle"), { description: message });
       }
     },
-    [config, update],
+    [config, update, t],
   );
 
   const handleForceRestartBusy = useCallback(async () => {
@@ -93,18 +99,18 @@ export function GlobalConfigControls({
         setLastBusySkip(skippedBusy);
       }
 
-      toast.success("Restarted running sessions", {
+      toast.success(t("toasts:restartBusy.successTitle"), {
         description:
           restarted.length > 0
-            ? `Restarted ${restarted.length} session(s).`
-            : "No running sessions to restart.",
+            ? t("toasts:restartBusy.successDesc", { count: restarted.length })
+            : t("toasts:restartBusy.successDescNone"),
       });
     } catch (err) {
       const message =
-        err instanceof Error ? err.message : "Failed to restart busy sessions";
-      toast.error("Failed to restart busy sessions", { description: message });
+        err instanceof Error ? err.message : t("toasts:restartBusy.fallbackError");
+      toast.error(t("toasts:restartBusy.errorTitle"), { description: message });
     }
-  }, [lastBusySkip, update]);
+  }, [lastBusySkip, update, t]);
 
   const attachments = usePromptInputAttachments();
 
@@ -114,7 +120,7 @@ export function GlobalConfigControls({
         variant="ghost"
         size="icon"
         className="size-9 border-0"
-        aria-label="Attach files"
+        aria-label={t("chat:attachFiles")}
         type="button"
         onClick={() => attachments.openFileDialog()}
       >
@@ -129,24 +135,24 @@ export function GlobalConfigControls({
             variant="ghost"
             size="sm"
             className="h-9 max-w-[160px] justify-start gap-2 border-0"
-            aria-label="Change global model"
+            aria-label={t("config:model.changeAria")}
             type="button"
             disabled={isLoading || isUpdating || !config}
           >
             <Cpu className="size-4 shrink-0" />
             <span className="truncate">
-              {config ? config.defaultModel : "Model"}
+              {config ? config.defaultModel : t("config:model.fallback")}
             </span>
             {(isLoading || isUpdating) && (
               <Loader className="ml-auto shrink-0" size={14} />
             )}
           </Button>
         </ModelSelectorTrigger>
-        <ModelSelectorContent title="Select global model">
-          <ModelSelectorInput placeholder="Search models..." />
+        <ModelSelectorContent title={t("config:model.title")}>
+          <ModelSelectorInput placeholder={t("config:model.placeholder")} />
           <ModelSelectorList>
-            <ModelSelectorEmpty>No models found.</ModelSelectorEmpty>
-            <ModelSelectorGroup heading="Models">
+            <ModelSelectorEmpty>{t("config:model.empty")}</ModelSelectorEmpty>
+            <ModelSelectorGroup heading={t("config:model.heading")}>
               {(config?.models ?? []).map((m) => {
                 const isSelected = m.name === config?.defaultModel;
                 const label = `${m.name} (${m.provider})`;
@@ -183,10 +189,10 @@ export function GlobalConfigControls({
             <TooltipTrigger asChild>
               <div className="flex h-9 items-center gap-2 rounded-md px-2">
                 <span className="text-xs text-muted-foreground">
-                  Plan
+                  {t("chat:planMode.label")}
                 </span>
                 <Switch
-                  aria-label="Toggle plan mode"
+                  aria-label={t("chat:planMode.toggle")}
                   checked={planMode}
                   onCheckedChange={onPlanModeChange}
                 />
@@ -194,8 +200,8 @@ export function GlobalConfigControls({
             </TooltipTrigger>
             <TooltipContent sideOffset={8}>
               {planMode
-                ? "Plan mode is active. The model will only read and plan, not modify files."
-                : "Enable plan mode for read-only research and planning."}
+                ? t("chat:planMode.active")
+                : t("chat:planMode.enable")}
             </TooltipContent>
           </Tooltip>
         </>
@@ -210,8 +216,8 @@ export function GlobalConfigControls({
           variant="outline"
           size="icon"
           className="size-9"
-          aria-label="Force restart busy sessions"
-          title="Force restart busy sessions"
+          aria-label={t("config:model.forceRestart")}
+          title={t("config:model.forceRestart")}
           type="button"
           onClick={handleForceRestartBusy}
           disabled={isUpdating}
@@ -225,8 +231,8 @@ export function GlobalConfigControls({
           variant="outline"
           size="icon"
           className="size-9"
-          aria-label="Reload global config"
-          title="Reload global config"
+          aria-label={t("config:model.reload")}
+          title={t("config:model.reload")}
           type="button"
           onClick={() => {
             refresh();

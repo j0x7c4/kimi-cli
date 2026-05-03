@@ -1,0 +1,173 @@
+{
+  "attachFiles": "Attach files",
+  "planMode": {
+    "label": "Plan",
+    "toggle": "Toggle plan mode",
+    "active": "Plan mode is active. The model will only read and plan, not modify files.",
+    "enable": "Enable plan mode for read-only research and planning."
+  },
+  "approval": {
+    "allowAction": "Allow this {{action}}?",
+    "sessionApproved": "Session approved. Future matching requests auto-approve.",
+    "approvalConfirmed": "Approval confirmed. Continuing execution…",
+    "requestDenied": "Request denied",
+    "requestDeniedWithReason": "Request denied: {{reason}}",
+    "waitingApproval": "Waiting for your approval…",
+    "executionCancelled": "Tool execution cancelled.",
+    "approve": "Approve",
+    "approving": "Approving...",
+    "approveForSession": "Approve for session",
+    "decline": "Decline",
+    "declining": "Declining...",
+    "declineWithFeedback": "Decline with feedback",
+    "cancelFeedback": "Cancel feedback",
+    "submitFeedback": "Submit feedback",
+    "feedbackPlaceholder": "Tell the model what to do instead...",
+    "feedbackHint": "Enter to submit · Shift+Enter for newline · Esc to cancel",
+    "manualRequiredBy": "Manual approval required by {{sender}}",
+    "actionLabel": "Action:",
+    "confirming": "Confirming…",
+    "approvingSession": "Approving session…"
+  },
+  "activity": {
+    "uploadingFiles": "Uploading files...",
+    "errorFallback": "An error occurred",
+    "connecting": "Connecting...",
+    "waitingApproval": "Waiting for approval...",
+    "loadingHistory": "Loading history...",
+    "thinking": "Thinking...",
+    "awaitingInput": "Awaiting input",
+    "runningTool": "Running {{tool}}...",
+    "tools": {
+      "Read": "Reading files...",
+      "Write": "Writing files...",
+      "Edit": "Editing code...",
+      "Bash": "Running command...",
+      "Glob": "Searching files...",
+      "Grep": "Searching content...",
+      "WebFetch": "Fetching web content...",
+      "WebSearch": "Searching the web...",
+      "Task": "Running agent...",
+      "NotebookEdit": "Editing notebook..."
+    }
+  },
+  "composer": {
+    "placeholderNoSession": "Create a session to start...",
+    "placeholderConnecting": "Connecting...",
+    "placeholderStarting": "Starting environment...",
+    "placeholderFollowUp": "Add a follow-up message...",
+    "placeholderDefault": "Ask anything, / for commands, @ to mention files",
+    "uploadingBadge": "Uploading files…",
+    "expandInput": "Expand input",
+    "collapseInput": "Collapse input",
+    "stopGeneration": "Stop generation",
+    "queueMessage": "Queue message"
+  },
+  "header": {
+    "openSidebar": "Open sessions sidebar",
+    "doubleClickRename": "Double-click to rename",
+    "showFiles": "Show workspace files",
+    "hideFiles": "Hide workspace files",
+    "searchMessages": "Search messages",
+    "foldAll": "Fold all blocks",
+    "unfoldAll": "Unfold all blocks"
+  },
+  "conversation": {
+    "startingEnv": "Starting environment...",
+    "connectingSession": "Connecting to session...",
+    "createSessionTitle": "Create a session to begin",
+    "createSessionHint": "Click the + button in the sidebar to start a new session",
+    "createNewSession": "Create new session",
+    "newTabHint": "{{modifier}}+Click to open in new tab",
+    "startConversation": "Start a conversation by typing a message below."
+  },
+  "files": {
+    "title": "Workspace files",
+    "currentWorkDir": "Current work directory",
+    "refresh": "Refresh workspace files",
+    "close": "Close workspace files panel",
+    "up": "Up",
+    "root": "Root",
+    "loading": "Loading files...",
+    "loadFailed": "Failed to load workspace files",
+    "loadDirFailed": "Failed to load this directory",
+    "tryAgain": "Try again",
+    "emptyDir": "No files in this directory.",
+    "directory": "Directory",
+    "fileLabel": "File",
+    "openDir": "Open directory {{name}}",
+    "download": "Download {{name}}"
+  },
+  "mentions": {
+    "pendingUploads": "Pending uploads",
+    "workspaceFiles": "Workspace files",
+    "uploadBadge": "Upload",
+    "workspaceBadge": "Workspace",
+    "noMatch": "No files match \"@{{query}}\".",
+    "noFiles": "No files available to mention yet.",
+    "indexing": "Indexing workspace files…",
+    "unavailable": "Workspace files unavailable.",
+    "retry": "Retry",
+    "selectSession": "Select an active session to enable workspace file mentions.",
+    "filesReady_one": "{{count}} file ready to mention.",
+    "filesReady_other": "{{count}} files ready to mention.",
+    "workspaceIndexed": "Workspace files indexed.",
+    "searchDeeperHint": " Type a path to search deeper."
+  },
+  "commands": {
+    "heading": "Slash Commands",
+    "noMatch": "No commands match \"/{{query}}\".",
+    "empty": "No commands available."
+  },
+  "search": {
+    "placeholder": "Search in conversation...",
+    "resultCount_one": "{{count}} result",
+    "resultCount_other": "{{count}} results",
+    "noResults": "No results",
+    "noMessages": "No messages found",
+    "jumpToMessage": "Jump to message",
+    "selectResult": "Select a result to preview",
+    "typeToSearch": "Type to search",
+    "navigate": "Navigate",
+    "close": "Close",
+    "title": "Search Messages",
+    "messageLabel": {
+      "user": "User",
+      "assistant": "Assistant",
+      "thinking": "Thinking"
+    },
+    "preview": {
+      "content": "Content",
+      "thinking": "Thinking",
+      "tool": "Tool",
+      "input": "Input",
+      "output": "Output",
+      "message": "Message",
+      "code": "Code"
+    }
+  },
+  "openIn": {
+    "noDirectory": "No directory",
+    "pathCopied": "Path copied",
+    "copyFailed": "Failed to copy path",
+    "noWorkDir": "No working directory",
+    "noWorkDirDesc": "Create a session with a working directory first.",
+    "openWorkDir": "Open working directory",
+    "open": "Open",
+    "openInLabel": "Open in {{label}}",
+    "openInLabelLastUsed": "{{label}} (last used)",
+    "openFailed": "Failed to open application",
+    "unexpectedError": "Unexpected error",
+    "chooseApp": "Choose app to open working directory",
+    "lastUsed": "Last used",
+    "copyPath": "Copy path"
+  },
+  "sessionInfo": {
+    "title": "Session Info",
+    "sessionId": "Session ID",
+    "workingDirectory": "Working Directory",
+    "sessionDirectory": "Session Directory",
+    "info": "Session info",
+    "copy": "Copy {{label}}"
+  }
+}

@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import type { ChatStatus } from "ai";
+import { useTranslation } from "react-i18next";
 import type { PromptInputMessage } from "@ai-elements";
 import type { ApprovalResponseDecision, TokenUsage } from "@/hooks/wireTypes";
 import type { LiveMessage } from "@/hooks/types";
@@ -125,6 +126,7 @@ export const ChatWorkspace = memo(function ChatWorkspaceComponent({
   onForkSession,
   errorMessage,
 }: ChatWorkspaceProps): ReactElement {
+  const { t } = useTranslation(["chat"]);
   const [blocksExpanded, setBlocksExpanded] = useState(false);
   const [isFilesPanelOpen, setIsFilesPanelOpen] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -155,6 +157,7 @@ export const ChatWorkspace = memo(function ChatWorkspaceComponent({
       isUploadingFiles,
       messages,
       errorMessage,
+      t,
     });
 
     // If status and description haven't changed, return cached reference
@@ -169,7 +172,7 @@ export const ChatWorkspace = memo(function ChatWorkspaceComponent({
 
     prevActivityRef.current = newStatus;
     return newStatus;
-  }, [status, isAwaitingFirstResponse, isReplayingHistory, isUploadingFiles, messages, errorMessage]);
+  }, [status, isAwaitingFirstResponse, isReplayingHistory, isUploadingFiles, messages, errorMessage, t]);
 
   const maxTokens = maxContextSize ?? 64000;
   const usedTokens = Math.round(contextUsage * maxTokens);

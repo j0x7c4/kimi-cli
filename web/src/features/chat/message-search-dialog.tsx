@@ -16,6 +16,8 @@ import {
   WrenchIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { cn } from "@/lib/utils";
 import { searchMessages, type SearchMatch } from "./message-search-utils";
 
@@ -89,17 +91,17 @@ function getMessageIcon(message: LiveMessage) {
   return <BotIcon className="size-3.5" />;
 }
 
-function getMessageLabel(message: LiveMessage): string {
+function getMessageLabel(message: LiveMessage, t: TFunction): string {
   if (message.role === "user") {
-    return "User";
+    return t("search.messageLabel.user");
   }
   if (message.variant === "tool" && message.toolCall?.title) {
     return message.toolCall.title;
   }
   if (message.variant === "thinking") {
-    return "Thinking";
+    return t("search.messageLabel.thinking");
   }
-  return "Assistant";
+  return t("search.messageLabel.assistant");
 }
 
 export function MessageSearchDialog({
@@ -108,6 +110,7 @@ export function MessageSearchDialog({
   onOpenChange,
   onJumpToMessage,
 }: MessageSearchDialogProps) {
+  const { t } = useTranslation("chat");
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -167,13 +170,13 @@ export function MessageSearchDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex h-[80dvh] max-w-[min(100vw-1.5rem,72rem)] flex-col gap-0 p-0 sm:h-[70vh] sm:max-w-6xl">
         <DialogHeader className="border-b px-4 py-3">
-          <DialogTitle className="sr-only">Search Messages</DialogTitle>
+          <DialogTitle className="sr-only">{t("search.title")}</DialogTitle>
           <div className="flex items-center gap-2">
             <SearchIcon className="size-4 text-muted-foreground" />
             <Input
               ref={inputRef}
               className="h-8 flex-1 border-none bg-transparent shadow-none focus-visible:ring-0"
-              placeholder="Search in conversation..."
+              placeholder={t("search.placeholder")}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -181,8 +184,8 @@ export function MessageSearchDialog({
             <span className="text-xs text-muted-foreground">
               {query
                 ? matches.length > 0
-                  ? `${matches.length} result${matches.length !== 1 ? "s" : ""}`
-                  : "No results"
+                  ? t("search.resultCount", { count: matches.length })
+                  : t("search.noResults")
                 : ""}
             </span>
           </div>
@@ -195,7 +198,7 @@ export function MessageSearchDialog({
               <div ref={resultsRef} className="p-2">
                 {matches.length === 0 && query ? (
                   <p className="px-2 py-4 text-center text-sm text-muted-foreground">
-                    No messages found
+                    {t("search.noMessages")}
                   </p>
                 ) : (
                   matches.map((match, index) => (
@@ -218,7 +221,7 @@ export function MessageSearchDialog({
                       <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                         {getMessageIcon(match.message)}
                         <span className="truncate">
-                          {getMessageLabel(match.message)}
+                          {getMessageLabel(match.message, t)}
                         </span>
                       </div>
                       <p className="mt-1 line-clamp-2 text-sm">
@@ -239,7 +242,7 @@ export function MessageSearchDialog({
                   <div className="flex items-center gap-2 text-sm">
                     {getMessageIcon(selectedMatch.message)}
                     <span className="font-medium">
-                      {getMessageLabel(selectedMatch.message)}
+                      {getMessageLabel(selectedMatch.message, t)}
                     </span>
                   </div>
                   <Button
@@ -251,19 +254,19 @@ export function MessageSearchDialog({
                       onOpenChange(false);
                     }}
                   >
-                    Jump to message
+                    {t("search.jumpToMessage")}
                     <ArrowRightIcon className="size-3" />
                   </Button>
                 </div>
                 <ScrollArea className="flex-1 overflow-x-hidden">
                   <div className="p-4">
-                    <PreviewContent match={selectedMatch} query={query} />
+                    <PreviewContent match={selectedMatch} query={query} t={t} />
                   </div>
                 </ScrollArea>
               </>
             ) : (
               <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                {query ? "Select a result to preview" : "Type to search"}
+                {query ? t("search.selectResult") : t("search.typeToSearch")}
               </div>
             )}
           </div>
@@ -275,17 +278,17 @@ export function MessageSearchDialog({
             <kbd className="rounded bg-muted px-1.5 py-0.5 font-mono">
               &uarr;&darr;
             </kbd>{" "}
-            Navigate
+            {t("search.navigate")}
           </span>
           <span>
             <kbd className="rounded bg-muted px-1.5 py-0.5 font-mono">
               Enter
             </kbd>{" "}
-            Jump to message
+            {t("search.jumpToMessage")}
           </span>
           <span>
             <kbd className="rounded bg-muted px-1.5 py-0.5 font-mono">Esc</kbd>{" "}
-            Close
+            {t("search.close")}
           </span>
         </div>
       </DialogContent>
@@ -296,40 +299,42 @@ export function MessageSearchDialog({
 function PreviewContent({
   match,
   query,
+  t,
 }: {
   match: SearchMatch;
   query: string;
+  t: TFunction;
 }) {
   const { message } = match;
 
   const sections: { label: string; content: string }[] = [];
 
   if (message.content) {
-    sections.push({ label: "Content", content: message.content });
+    sections.push({ label: t("search.preview.content"), content: message.content });
   }
   if (message.thinking) {
-    sections.push({ label: "Thinking", content: message.thinking });
+    sections.push({ label: t("search.preview.thinking"), content: message.thinking });
   }
   if (message.toolCall) {
     if (message.toolCall.title) {
-      sections.push({ label: "Tool", content: message.toolCall.title });
+      sections.push({ label: t("search.preview.tool"), content: message.toolCall.title });
     }
     if (message.toolCall.input) {
       const inputStr =
         typeof message.toolCall.input === "string"
           ? message.toolCall.input
           : JSON.stringify(message.toolCall.input, null, 2);
-      sections.push({ label: "Input", content: inputStr });
+      sections.push({ label: t("search.preview.input"), content: inputStr });
     }
     if (message.toolCall.output) {
-      sections.push({ label: "Output", content: message.toolCall.output });
+      sections.push({ label: t("search.preview.output"), content: message.toolCall.output });
     }
     if (message.toolCall.message) {
-      sections.push({ label: "Message", content: message.toolCall.message });
+      sections.push({ label: t("search.preview.message"), content: message.toolCall.message });
     }
   }
   if (message.codeSnippet?.code) {
-    sections.push({ label: "Code", content: message.codeSnippet.code });
+    sections.push({ label: t("search.preview.code"), content: message.codeSnippet.code });
   }
 
   return (

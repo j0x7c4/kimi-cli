@@ -13,6 +13,7 @@ import { Progress } from "@/components/ui/progress";
 import { ContextProgressIcon } from "@ai-elements";
 import { cn } from "@/lib/utils";
 import type { TokenUsage } from "@/hooks/wireTypes";
+import { useTranslation } from "react-i18next";
 
 type ToolbarContextIndicatorProps = {
   usagePercent: number;
@@ -30,6 +31,7 @@ export const ToolbarContextIndicator = memo(
     tokenUsage,
     className,
   }: ToolbarContextIndicatorProps): ReactElement {
+    const { t } = useTranslation("tokens");
     const usedPercent = maxTokens > 0 ? usedTokens / maxTokens : 0;
 
     const used = new Intl.NumberFormat("en-US", {
@@ -76,25 +78,25 @@ export const ToolbarContextIndicator = memo(
             <div className="border-t p-3 space-y-2.5 text-xs">
               <div className="space-y-1">
                 <div className="text-[11px] font-medium text-muted-foreground">
-                  Input Tokens
+                  {t('context.inputToken')}
                 </div>
                 <RawUsageRow
-                  label="Regular"
+                  label={t('context.regular')}
                   value={tokenUsage.input_other}
-                  description="Tokens processed without cache"
+                  description={t('context.regularDesc')}
                 />
                 <RawUsageRow
-                  label="Cache Read"
+                  label={t('context.cacheRead')}
                   value={tokenUsage.input_cache_read}
-                  description="Tokens loaded from cache"
+                  description={t('context.cacheReadDesc')}
                 />
                 <RawUsageRow
-                  label="Cache Write"
+                  label={t('context.cacheWrite')}
                   value={tokenUsage.input_cache_creation}
-                  description="Tokens written to cache"
+                  description={t('context.cacheWriteDesc')}
                 />
                 <div className="flex items-center justify-between text-xs font-medium border-t mt-1 pt-1">
-                  <span>Total Input</span>
+                  <span>{t("context.totalInput")}</span>
                   <span>
                     {new Intl.NumberFormat("en-US", { notation: "compact" }).format(
                       tokenUsage.input_other +
@@ -107,12 +109,12 @@ export const ToolbarContextIndicator = memo(
 
               <div className="space-y-1 border-t pt-2.5">
                 <div className="text-[11px] font-medium text-muted-foreground">
-                  Output Tokens
+                  {t("context.outputTokens")}
                 </div>
                 <RawUsageRow
-                  label="Generated"
+                  label={t("context.generated")}
                   value={tokenUsage.output}
-                  description="Tokens generated in response"
+                  description={t("context.generatedDesc")}
                 />
               </div>
             </div>

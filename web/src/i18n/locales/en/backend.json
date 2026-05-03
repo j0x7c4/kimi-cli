@@ -1,0 +1,17 @@
+{
+  "exact": {
+    "Session Error": "Session Error",
+    "Memory saved": "Memory saved"
+  },
+  "bgTask": {
+    "completed": "Background task completed: {{desc}}",
+    "failed": "Background task failed: {{desc}}",
+    "timedOut": "Background task timed out: {{desc}}",
+    "killed": "Background task killed: {{desc}}",
+    "lost": "Background task lost: {{desc}}"
+  },
+  "approval": {
+    "rejected": "The tool call is rejected by the user. The user does not allow this tool call to proceed.",
+    "rejectedWithFeedback": "Rejected: {{feedback}}"
+  }
+}

@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import { useTranslation } from "react-i18next";
 import { Input } from "@/components/ui/input";
 import {
   Tooltip,
@@ -47,6 +48,7 @@ export function ChatWorkspaceHeader({
   onOpenSidebar,
   onRenameSession,
 }: ChatWorkspaceHeaderProps) {
+  const { t } = useTranslation("chat");
   const searchShortcutModifier = isMacOS() ? "Cmd" : "Ctrl";
 
   // Editing state
@@ -88,7 +90,7 @@ export function ChatWorkspaceHeader({
         {onOpenSidebar ? (
           <button
             type="button"
-            aria-label="Open sessions sidebar"
+            aria-label={t("header.openSidebar")}
             className="inline-flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground lg:hidden"
             onClick={onOpenSidebar}
           >
@@ -129,7 +131,7 @@ export function ChatWorkspaceHeader({
                 <div>{sessionDescription}</div>
                 {onRenameSession && (
                   <div className="text-muted-foreground text-[10px] mt-1">
-                    Double-click to rename
+                    {t("header.doubleClickRename")}
                   </div>
                 )}
               </TooltipContent>
@@ -158,8 +160,8 @@ export function ChatWorkspaceHeader({
                     type="button"
                     aria-label={
                       isFilesPanelOpen
-                        ? "Hide workspace files"
-                        : "Show workspace files"
+                        ? t("header.hideFiles")
+                        : t("header.showFiles")
                     }
                     className="relative inline-flex items-center cursor-pointer justify-center rounded-md p-2 text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
                     onClick={onToggleFilesPanel}
@@ -173,8 +175,8 @@ export function ChatWorkspaceHeader({
                 </TooltipTrigger>
                 <TooltipContent side="bottom">
                   {isFilesPanelOpen
-                    ? "Hide workspace files"
-                    : "Show workspace files"}
+                    ? t("header.hideFiles")
+                    : t("header.showFiles")}
                 </TooltipContent>
               </Tooltip>
             ) : null}
@@ -183,7 +185,7 @@ export function ChatWorkspaceHeader({
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  aria-label="Search messages"
+                  aria-label={t("header.searchMessages")}
                   className="inline-flex items-center cursor-pointer justify-center rounded-md p-2 text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
                   onClick={onOpenSearch}
                 >
@@ -191,7 +193,7 @@ export function ChatWorkspaceHeader({
                 </button>
               </TooltipTrigger>
               <TooltipContent className="flex items-center gap-2" side="bottom">
-                <span>Search messages</span>
+                <span>{t("header.searchMessages")}</span>
                 <KbdGroup>
                   <Kbd>{searchShortcutModifier}</Kbd>
                   <span className="text-muted-foreground">+</span>
@@ -205,7 +207,7 @@ export function ChatWorkspaceHeader({
                 <button
                   type="button"
                   aria-label={
-                    blocksExpanded ? "Fold all blocks" : "Unfold all blocks"
+                    blocksExpanded ? t("header.foldAll") : t("header.unfoldAll")
                   }
                   className="inline-flex items-center cursor-pointer justify-center rounded-md p-2 text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
                   onClick={onToggleBlocks}
@@ -218,7 +220,7 @@ export function ChatWorkspaceHeader({
                 </button>
               </TooltipTrigger>
               <TooltipContent side="bottom">
-                {blocksExpanded ? "Fold all blocks" : "Unfold all blocks"}
+                {blocksExpanded ? t("header.foldAll") : t("header.unfoldAll")}
               </TooltipContent>
             </Tooltip>
           </>

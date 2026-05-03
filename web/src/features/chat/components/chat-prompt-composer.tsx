@@ -26,6 +26,7 @@ import { SlashCommandMenu } from "../slash-command-menu";
 import { useSlashCommands, type SlashCommandDef } from "../useSlashCommands";
 import { PromptToolbar } from "./prompt-toolbar";
 import { ArrowUpIcon, Loader2Icon, SquareIcon, Maximize2Icon, Minimize2Icon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
   Tooltip,
@@ -93,6 +94,7 @@ export const ChatPromptComposer = memo(function ChatPromptComposerComponent({
   maxTokens,
   tokenUsage,
 }: ChatPromptComposerProps): ReactElement {
+  const { t } = useTranslation("chat");
   const promptController = usePromptInputController();
   const attachmentContext = usePromptInputAttachments();
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -223,7 +225,7 @@ export const ChatPromptComposer = memo(function ChatPromptComposerComponent({
             onClick={handleToggleExpand}
             disabled={!(canSendMessage && currentSession)}
             className="absolute top-2 right-2 z-10 p-1 cursor-pointer rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors disabled:opacity-50 disabled:pointer-events-none"
-            aria-label={isExpanded ? "Collapse input" : "Expand input"}
+            aria-label={isExpanded ? t("composer.collapseInput") : t("composer.expandInput")}
           >
             {isExpanded ? (
               <Minimize2Icon className="size-4" />
@@ -240,7 +242,7 @@ export const ChatPromptComposer = memo(function ChatPromptComposerComponent({
               variant="secondary"
             >
               <Loader2Icon className="size-4 animate-spin text-primary" />
-              <span>Uploading files…</span>
+              <span>{t("composer.uploadingBadge")}</span>
             </Badge>
           ) : null}
           <div className="relative w-full flex items-start">
@@ -255,14 +257,14 @@ export const ChatPromptComposer = memo(function ChatPromptComposerComponent({
                 )}
                 placeholder={
                   !currentSession
-                    ? "Create a session to start..."
+                    ? t("composer.placeholderNoSession")
                     : isAwaitingIdle
                       ? isReplayingHistory
-                        ? "Connecting..."
-                        : "Starting environment..."
+                        ? t("composer.placeholderConnecting")
+                        : t("composer.placeholderStarting")
                       : isStreaming
-                        ? "Add a follow-up message..."
-                        : "Ask anything, / for commands, @ to mention files"
+                        ? t("composer.placeholderFollowUp")
+                        : t("composer.placeholderDefault")
                 }
                 aria-busy={isUploading}
                 disabled={!canSendMessage || isUploading || !currentSession || isAwaitingIdle}
@@ -309,7 +311,7 @@ export const ChatPromptComposer = memo(function ChatPromptComposerComponent({
           {isStreaming ? (
             <div className="flex items-center gap-1.5 shrink-0">
               <PromptInputButton
-                aria-label="Stop generation"
+                aria-label={t("composer.stopGeneration")}
                 disabled={!onCancel}
                 onClick={(event) => {
                   event.preventDefault();
@@ -325,7 +327,7 @@ export const ChatPromptComposer = memo(function ChatPromptComposerComponent({
               <Tooltip>
                 <TooltipTrigger asChild>
                   <PromptInputSubmit
-                    aria-label="Queue message"
+                    aria-label={t("composer.queueMessage")}
                     size="icon-sm"
                     variant="outline"
                     className="shrink-0"
@@ -334,7 +336,7 @@ export const ChatPromptComposer = memo(function ChatPromptComposerComponent({
                     <ArrowUpIcon className="size-4" />
                   </PromptInputSubmit>
                 </TooltipTrigger>
-                <TooltipContent>Queue message</TooltipContent>
+                <TooltipContent>{t("composer.queueMessage")}</TooltipContent>
               </Tooltip>
             </div>
           ) : (

@@ -1,0 +1,67 @@
+{
+  "advanced": {
+    "title": "高级设置",
+    "thinkingMode": "思考模式",
+    "enableThinking": "开启思考模式"
+  },
+  "create": {
+    "title": "新建会话",
+    "description": "搜索目录或输入新路径",
+    "placeholder": "搜索目录或输入路径...",
+    "emptyNoMatch": "没有匹配的目录。",
+    "emptyLoading": "正在加载目录...",
+    "emptyTypePath": "输入路径以新建会话。",
+    "groupCustom": "自定义路径",
+    "groupCurrent": "当前目录",
+    "groupRecent": "最近使用的目录",
+    "tooltip": {
+      "title1": "创建新会话",
+      "title2": "在此创建新会话",
+      "body": "点击，在新窗口打开"
+    }
+  },
+  "delete_dialog": {
+    "title": "删除会话",
+    "body": "你确定要删除\"{{name}}\"吗？这个操作无法反悔。",
+    "cancel": "取消",
+    "confirm": "确认删除"
+  }, 
+  "createDir": {
+    "title": "目录不存在",
+    "body": "目录 <pathCode>{{path}}</pathCode> 不存在。是否创建？",
+    "create": "创建目录"
+  },
+  "archive": {
+    "gray": "尚未保存记忆",
+    "in_progress": "正在记录记忆…",
+    "green": "记忆已是最新",
+    "yellow": "上次保存后有新活动",
+    "red": "上次保存失败"
+  },
+  "search": {
+    "placeholder": "搜索会话..."
+  },
+  "archived": {
+    "title": "归档",
+    "label_no": "没有归档的会话"
+  },
+  "action": {
+    "rename": "重命名",
+    "archive": "归档",
+    "unarchive": "取消归档",
+    "record_memory": "保存记忆",
+    "select_multiple": "选择多个",
+    "delete": "删除"
+  },
+  "memory": {
+    "in_progress_dialog": {
+      "title": "正在保存记忆中",
+      "body": "这个会话的记忆正在保存中，请稍等。"
+    },
+    "up_to_date_dialog": {
+      "title": "记忆已经是最新了",
+      "body": "该会话的记忆已经是最新了，等有新对话的时候可以再试试。"
+    },
+    "confirm": "明白了"
+  }
+}

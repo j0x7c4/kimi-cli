@@ -1,0 +1,26 @@
+{
+  "actions": {
+    "cancel": "Cancel",
+    "save": "Save",
+    "confirm": "Confirm",
+    "close": "Close",
+    "retry": "Retry",
+    "create": "Create"
+  },
+  "states": {
+    "loading": "Loading…"
+  },
+  "lang": {
+    "switchToEn": "Switch to English",
+    "switchToZh": "Switch to Chinese"
+  },
+  "sidebar": {
+    "expand": "Expand sidebar",
+    "collapse": "Collapse sidebar",
+    "close": "Close sessions sidebar"
+  },
+  "user": {
+    "signOut": "Sign out",
+    "adminPanel": "Admin Panel"
+  }
+}

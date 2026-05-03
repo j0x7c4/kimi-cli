@@ -12,6 +12,7 @@
  */
 import { type ReactElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChatStatus, FileUIPart } from "ai";
+import { useTranslation } from "react-i18next";
 import type { PromptInputMessage } from "@ai-elements";
 import { toast } from "sonner";
 import type {
@@ -82,6 +83,7 @@ export function ChatWorkspaceContainer({
     null,
   );
   const sessionId = selectedSessionId || null;
+  const { t } = useTranslation("toasts");
 
   const { config } = useGlobalConfig();
   const maxContextSize = useMemo(() => {
@@ -118,11 +120,14 @@ export function ChatWorkspaceContainer({
     return () => { for (const u of unregisters) u(); };
   }, [pluginRegistry]);
 
-  const handleStreamError = useCallback((error: Error) => {
-    toast.error("Connection Error", {
-      description: error.message,
-    });
-  }, []);
+  const handleStreamError = useCallback(
+    (error: Error) => {
+      toast.error(t("connectionError.title"), {
+        description: error.message,
+      });
+    },
+    [t],
+  );
 
   // Handle first turn completion for auto-rename
   // Backend reads messages from wire.jsonl automatically
@@ -266,11 +271,8 @@ export function ChatWorkspaceContainer({
 
         const uploadedCount = uploadResults.filter(Boolean).length;
         if (uploadedCount > 0) {
-          toast.success("Files uploaded", {
-            description:
-              uploadedCount === 1
-                ? "1 file uploaded successfully."
-                : `${uploadedCount} files uploaded successfully.`,
+          toast.success(t("chatUpload.successTitle"), {
+            description: t("chatUpload.successDesc", { count: uploadedCount }),
           });
         }
         return uploadedCount;
@@ -279,16 +281,18 @@ export function ChatWorkspaceContainer({
           "[ChatWorkspaceContainer] Failed to upload files:",
           error,
         );
-        toast.error("Failed to Upload Files", {
+        toast.error(t("chatUpload.errorTitle"), {
           description:
-            error instanceof Error ? error.message : "File upload failed",
+            error instanceof Error
+              ? error.message
+              : t("chatUpload.fallbackError"),
         });
         return 0;
       } finally {
         setIsUploadingFiles(false);
       }
     },
-    [uploadSessionFile],
+    [uploadSessionFile, t],
   );
 
   const handlePromptSubmit = useCallback(
@@ -296,15 +300,15 @@ export function ChatWorkspaceContainer({
       const hasPayload =
         message.text.trim().length > 0 || message.files.length > 0;
       if (!hasPayload) {
-        toast.info("Empty Message", {
-          description: "Please enter a message or attach a file.",
+        toast.info(t("chatUpload.emptyTitle"), {
+          description: t("chatUpload.emptyDesc"),
         });
         return;
       }
 
       if (isUploadingFiles) {
-        toast.info("Still uploading", {
-          description: "Please wait until file uploads finish.",
+        toast.info(t("chatUpload.stillUploadingTitle"), {
+          description: t("chatUpload.stillUploadingDesc"),
         });
         return;
       }
@@ -312,16 +316,16 @@ export function ChatWorkspaceContainer({
       if (status === "streaming" || status === "submitted") {
         // Queue text-only messages when AI is processing
         if (message.files.length > 0) {
-          toast.info("Still processing", {
-            description: "File attachments cannot be queued. Please wait.",
+          toast.info(t("queue.stillProcessingTitle"), {
+            description: t("queue.stillProcessingDesc"),
           });
           return;
         }
         const messageText = message.text.trim();
         if (messageText) {
           enqueue(messageText);
-          toast.info("Message queued", {
-            description: "It will be sent when the current response finishes.",
+          toast.info(t("queue.queuedTitle"), {
+            description: t("queue.queuedDesc"),
           });
         }
         return;
@@ -344,7 +348,7 @@ export function ChatWorkspaceContainer({
 
       await sendMessage(messageText);
     },
-    [status, isUploadingFiles, selectedSessionId, uploadFilesToSession, sendMessage, enqueue],
+    [status, isUploadingFiles, selectedSessionId, uploadFilesToSession, sendMessage, enqueue, t],
   );
 
   const handlePlanModeChange = useCallback((enabled: boolean) => {
@@ -358,15 +362,15 @@ export function ChatWorkspaceContainer({
       }
       try {
         await onForkSession(selectedSessionId, turnIndex);
-        toast.success("Session forked successfully");
+        toast.success(t("fork.successTitle"));
       } catch (error) {
-        toast.error("Fork failed", {
+        toast.error(t("fork.errorTitle"), {
           description:
-            error instanceof Error ? error.message : "Failed to fork session",
+            error instanceof Error ? error.message : t("fork.fallbackError"),
         });
       }
     },
-    [selectedSessionId, onForkSession],
+    [selectedSessionId, onForkSession, t],
   );
 
   useEffect(() => {

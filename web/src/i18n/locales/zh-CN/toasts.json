@@ -1,0 +1,50 @@
+{
+  "globalModel": {
+    "successTitle": "全局模型已更新",
+    "successDesc": "已重启 {{count}} 个运行中的会话。",
+    "busyTitle": "部分会话已跳过（忙碌中）",
+    "busyDesc": "已跳过 {{count}} 个忙碌会话。空闲后可重试，或强制重启。",
+    "errorTitle": "全局模型更新失败",
+    "fallbackError": "全局模型更新失败"
+  },
+  "restartBusy": {
+    "successTitle": "已重启运行中的会话",
+    "successDesc": "已重启 {{count}} 个会话。",
+    "successDescNone": "没有需要重启的运行中会话。",
+    "errorTitle": "重启忙碌会话失败",
+    "fallbackError": "重启忙碌会话失败"
+  },
+  "session": {
+    "errorTitle": "会话错误"
+  },
+  "chatUpload": {
+    "successTitle": "文件已上传",
+    "successDesc_other": "已成功上传 {{count}} 个文件。",
+    "errorTitle": "文件上传失败",
+    "fallbackError": "文件上传失败",
+    "emptyTitle": "消息为空",
+    "emptyDesc": "请输入消息或附加文件。",
+    "stillUploadingTitle": "正在上传",
+    "stillUploadingDesc": "请等待文件上传完成。"
+  },
+  "memory": {
+    "savedTitle": "记忆已保存",
+    "fallbackError": "记录记忆失败",
+    "startFallbackError": "启动记忆记录失败",
+    "recordingInBackground": "正在后台记录记忆…"
+  },
+  "connectionError": {
+    "title": "连接错误"
+  },
+  "queue": {
+    "stillProcessingTitle": "正在处理中",
+    "stillProcessingDesc": "附件无法排队，请稍候。",
+    "queuedTitle": "消息已排队",
+    "queuedDesc": "将在当前回复完成后发送。"
+  },
+  "fork": {
+    "successTitle": "会话已成功复刻",
+    "errorTitle": "复刻失败",
+    "fallbackError": "复刻会话失败"
+  }
+}

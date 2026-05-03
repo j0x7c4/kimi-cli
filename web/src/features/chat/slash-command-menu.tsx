@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 import { TerminalSquareIcon } from "lucide-react";
 import type { SlashCommandOption } from "./useSlashCommands";
@@ -20,6 +21,7 @@ export const SlashCommandMenu = ({
   onSelect,
   onHover,
 }: SlashCommandMenuProps) => {
+  const { t } = useTranslation("chat");
   const activeItemRef = useRef<HTMLButtonElement | null>(null);
 
   // Scroll active item into view when activeIndex changes
@@ -43,7 +45,7 @@ export const SlashCommandMenu = ({
         {options.length > 0 ? (
           <>
             <div className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-              Slash Commands
+              {t("commands.heading")}
             </div>
             <div className="max-h-80 overflow-y-auto px-1 [-webkit-overflow-scrolling:touch]">
               {options.map((option, index) => {
@@ -85,8 +87,8 @@ export const SlashCommandMenu = ({
         ) : (
           <div className="px-3 py-2 text-sm text-muted-foreground">
             {query
-              ? `No commands match "/${query}".`
-              : "No commands available."}
+              ? t("commands.noMatch", { query })
+              : t("commands.empty")}
           </div>
         )}
       </div>

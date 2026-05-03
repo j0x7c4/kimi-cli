@@ -1,4 +1,6 @@
 import { useEffect, useRef } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { cn } from "@/lib/utils";
 import {
   AlertCircleIcon,
@@ -43,14 +45,14 @@ type FileMentionMenuProps = {
   workspaceFileCount?: number;
 };
 
-const SectionLabel: Record<MentionOption["type"], string> = {
-  attachment: "Pending uploads",
-  workspace: "Workspace files",
+const SECTION_LABEL_KEYS: Record<MentionOption["type"], string> = {
+  attachment: "mentions.pendingUploads",
+  workspace: "mentions.workspaceFiles",
 };
 
-const TypeBadge: Record<MentionOption["type"], string> = {
-  attachment: "Upload",
-  workspace: "Workspace",
+const TYPE_BADGE_KEYS: Record<MentionOption["type"], string> = {
+  attachment: "mentions.uploadBadge",
+  workspace: "mentions.workspaceBadge",
 };
 
 const TypeIcon = {
@@ -65,6 +67,7 @@ const renderSection = ({
   activeItemRef,
   onHover,
   onSelect,
+  t,
 }: {
   label: string;
   options: MentionOption[];
@@ -72,6 +75,7 @@ const renderSection = ({
   activeItemRef: React.RefObject<HTMLButtonElement | null>;
   onHover: (index: number) => void;
   onSelect: (option: MentionOption) => void;
+  t: TFunction;
 }) => {
   if (!options.length) {
     return null;
@@ -116,7 +120,7 @@ const renderSection = ({
               <div className="flex shrink-0 items-center gap-1.5 text-[10px] text-muted-foreground">
                 {sizeLabel ? <span>{sizeLabel}</span> : null}
                 <span className="rounded border border-border/60 px-1 py-px font-medium uppercase">
-                  {TypeBadge[option.type]}
+                  {t(TYPE_BADGE_KEYS[option.type])}
                 </span>
               </div>
             </button>
@@ -141,6 +145,7 @@ export const FileMentionMenu = ({
   isWorkspaceAvailable,
   workspaceFileCount = 0,
 }: FileMentionMenuProps) => {
+  const { t } = useTranslation("chat");
   const activeItemRef = useRef<HTMLButtonElement>(null);
 
   // Scroll active item into view when activeIndex changes
@@ -169,27 +174,29 @@ export const FileMentionMenu = ({
           {hasSections ? (
             <>
               {renderSection({
-                label: SectionLabel.attachment,
+                label: t(SECTION_LABEL_KEYS.attachment),
                 options: sections.attachments,
                 activeIndex,
                 activeItemRef,
                 onHover,
                 onSelect,
+                t,
               })}
               {renderSection({
-                label: SectionLabel.workspace,
+                label: t(SECTION_LABEL_KEYS.workspace),
                 options: sections.workspace,
                 activeIndex,
                 activeItemRef,
                 onHover,
                 onSelect,
+                t,
               })}
             </>
           ) : (
             <div className="px-3 py-2 text-sm text-muted-foreground">
               {query
-                ? `No files match “@${query}”.`
-                : "No files available to mention yet."}
+                ? t("mentions.noMatch", { query })
+                : t("mentions.noFiles")}
             </div>
           )}
         </div>
@@ -198,39 +205,35 @@ export const FileMentionMenu = ({
             {workspaceStatus === "loading" ? (
               <div className="flex items-center gap-2">
                 <RefreshCwIcon className="size-3.5 animate-spin text-primary" />
-                Indexing workspace files…
+                {t("mentions.indexing")}
               </div>
             ) : workspaceStatus === "error" ? (
               <div className="flex flex-wrap items-center gap-2">
                 <span className="inline-flex items-center gap-1 text-destructive">
                   <AlertCircleIcon className="size-3.5" />
-                  {workspaceError ?? "Workspace files unavailable."}
+                  {workspaceError ?? t("mentions.unavailable")}
                 </span>
                 <button
                   type="button"
                   className="text-xs font-semibold text-primary underline underline-offset-2"
                   onClick={onRetryWorkspace}
                 >
-                  Retry
+                  {t("mentions.retry")}
                 </button>
               </div>
             ) : isWorkspaceAvailable ? (
               <div className="flex items-center justify-between text-xs">
                 <span>
                   {flatOptions.length
-                    ? `${flatOptions.length} file${
-                        flatOptions.length === 1 ? "" : "s"
-                      } ready to mention.`
-                    : "Workspace files indexed."}
+                    ? t("mentions.filesReady", { count: flatOptions.length })
+                    : t("mentions.workspaceIndexed")}
                   {workspaceFileCount >= MAX_WORKSPACE_FILES
-                    ? " Type a path to search deeper."
+                    ? t("mentions.searchDeeperHint")
                     : ""}
                 </span>
               </div>
             ) : (
-              <span>
-                Select an active session to enable workspace file mentions.
-              </span>
+              <span>{t("mentions.selectSession")}</span>
             )}
           </div>
         ) : null}

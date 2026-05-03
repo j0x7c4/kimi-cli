@@ -11,6 +11,7 @@ import {
 import type { Session } from "@/lib/api/models";
 import { CheckIcon, CopyIcon, InfoIcon } from "lucide-react";
 import { useState, useCallback } from "react";
+import { useTranslation } from "react-i18next";
 
 type SessionInfoItemProps = {
   label: string;
@@ -18,6 +19,7 @@ type SessionInfoItemProps = {
 };
 
 function SessionInfoItem({ label, value }: SessionInfoItemProps) {
+  const { t } = useTranslation("chat");
   const [copied, setCopied] = useState(false);
 
   const handleCopy = useCallback(async () => {
@@ -48,7 +50,7 @@ function SessionInfoItem({ label, value }: SessionInfoItemProps) {
           type="button"
           onClick={handleCopy}
           className="shrink-0 rounded p-1 cursor-pointer text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          aria-label={`Copy ${label}`}
+          aria-label={t("sessionInfo.copy", { label })}
         >
           {copied ? (
             <CheckIcon className="size-3.5 text-green-500" />
@@ -70,15 +72,22 @@ export function SessionInfoSection({
   sessionId,
   session,
 }: SessionInfoSectionProps) {
+  const { t } = useTranslation("chat");
   return (
     <div className="space-y-3">
-      <p className="font-medium text-sm">Session Info</p>
-      <SessionInfoItem label="Session ID" value={sessionId} />
+      <p className="font-medium text-sm">{t("sessionInfo.title")}</p>
+      <SessionInfoItem label={t("sessionInfo.sessionId")} value={sessionId} />
       {session?.workDir && (
-        <SessionInfoItem label="Working Directory" value={session.workDir} />
+        <SessionInfoItem
+          label={t("sessionInfo.workingDirectory")}
+          value={session.workDir}
+        />
       )}
       {session?.sessionDir && (
-        <SessionInfoItem label="Session Directory" value={session.sessionDir} />
+        <SessionInfoItem
+          label={t("sessionInfo.sessionDirectory")}
+          value={session.sessionDir}
+        />
       )}
     </div>
   );
@@ -93,6 +102,7 @@ export function SessionInfoPopover({
   sessionId,
   session,
 }: SessionInfoPopoverProps) {
+  const { t } = useTranslation("chat");
   return (
     <DropdownMenu>
       <Tooltip>
@@ -100,24 +110,30 @@ export function SessionInfoPopover({
           <DropdownMenuTrigger asChild>
             <button
               type="button"
-              aria-label="Session info"
+              aria-label={t("sessionInfo.info")}
               className="inline-flex items-center justify-center rounded-md p-2 text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
             >
               <InfoIcon className="size-4" />
             </button>
           </DropdownMenuTrigger>
         </TooltipTrigger>
-        <TooltipContent side="bottom">Session info</TooltipContent>
+        <TooltipContent side="bottom">{t("sessionInfo.info")}</TooltipContent>
       </Tooltip>
       <DropdownMenuContent align="end" className="w-100 p-3">
         <div className="space-y-3">
-          <p className="font-medium text-sm">Session Info</p>
-          <SessionInfoItem label="Session ID" value={sessionId} />
+          <p className="font-medium text-sm">{t("sessionInfo.title")}</p>
+          <SessionInfoItem label={t("sessionInfo.sessionId")} value={sessionId} />
           {session?.workDir && (
-            <SessionInfoItem label="Working Directory" value={session.workDir} />
+            <SessionInfoItem
+              label={t("sessionInfo.workingDirectory")}
+              value={session.workDir}
+            />
           )}
           {session?.sessionDir && (
-            <SessionInfoItem label="Session Directory" value={session.sessionDir} />
+            <SessionInfoItem
+              label={t("sessionInfo.sessionDirectory")}
+              value={session.sessionDir}
+            />
           )}
         </div>
       </DropdownMenuContent>

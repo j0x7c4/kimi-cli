@@ -1,0 +1,26 @@
+{
+  "actions": {
+    "cancel": "取消",
+    "save": "保存",
+    "confirm": "确认",
+    "close": "关闭",
+    "retry": "重试",
+    "create": "创建"
+  },
+  "states": {
+    "loading": "加载中…"
+  },
+  "lang": {
+    "switchToEn": "切换到英文",
+    "switchToZh": "切换到中文"
+  },
+  "sidebar": {
+    "expand": "展开侧边栏",
+    "collapse": "折叠侧边栏",
+    "close": "关闭会话侧边栏"
+  },
+  "user": {
+    "signOut": "退出登录",
+    "adminPanel": "管理面板"
+  }
+}

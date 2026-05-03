@@ -1,0 +1,12 @@
+{
+  "model": {
+    "changeAria": "更改全局模型",
+    "fallback": "模型",
+    "title": "选择全局模型",
+    "placeholder": "搜索模型...",
+    "empty": "未找到模型。",
+    "heading": "模型",
+    "forceRestart": "强制重启忙碌会话",
+    "reload": "重新加载全局配置"
+  }
+}

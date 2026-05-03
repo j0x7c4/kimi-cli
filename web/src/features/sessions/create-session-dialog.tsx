@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { Trans, useTranslation } from "react-i18next";
 
 import {
   AlertDialog,
@@ -102,6 +103,7 @@ export function CreateSessionDialog({
   const [isAdvancedOpen, setIsAdvancedOpen] = useState(false);
   const isCreatingRef = useRef(false);
   const commandListRef = useRef<HTMLDivElement>(null);
+  const { t } = useTranslation(["sessions", "common"]);
 
   // Fetch startup dir and work dirs independently for progressive loading
   useEffect(() => {
@@ -257,13 +259,13 @@ export function CreateSessionDialog({
       <CommandDialog
         open={open}
         onOpenChange={onOpenChange}
-        title="Create New Session"
-        description="Search directories or type a new path"
+        title={t("sessions:create.title")}
+        description={t("sessions:create.description")}
         showCloseButton={false}
       >
         <Command value={commandValue} onValueChange={setCommandValue}>
           <CommandInput
-            placeholder="Search directories or type a path..."
+            placeholder={t("sessions:create.placeholder")}
             value={inputValue}
             onValueChange={setInputValue}
             onKeyDown={handleKeyDown}
@@ -271,15 +273,15 @@ export function CreateSessionDialog({
           <CommandList ref={commandListRef}>
             <CommandEmpty>
               {trimmedInput
-                ? "No matching directories."
+                ? t("sessions:create.emptyNoMatch")
                 : isLoading
-                  ? "Loading directories..."
-                  : "Type a path to start a new session."}
+                  ? t("sessions:create.emptyLoading")
+                  : t("sessions:create.emptyTypePath")}
             </CommandEmpty>
 
             {showCustomPathOption && (
               <>
-                <CommandGroup heading="Custom Path">
+                <CommandGroup heading={t("sessions:create.groupCustom")}>
                   <CommandItem
                     className="group"
                     value={`__custom__${trimmedInput}`}
@@ -305,7 +307,7 @@ export function CreateSessionDialog({
 
             {startupDir && (
               <>
-                <CommandGroup heading="Current Directory">
+                <CommandGroup heading={t("sessions:create.groupCurrent")}>
                   <CommandItem
                     className="group"
                     value={startupDir}
@@ -333,7 +335,7 @@ export function CreateSessionDialog({
             )}
 
             {recentDirs.length > 0 && (
-              <CommandGroup heading="Recent Directories">
+              <CommandGroup heading={t("sessions:create.groupRecent")}>
                 {recentDirs.map((dir) => (
                   <CommandItem
                     className="group"
@@ -368,16 +370,16 @@ export function CreateSessionDialog({
           <div className="border-t px-2 py-1.5">
             <Collapsible open={isAdvancedOpen} onOpenChange={setIsAdvancedOpen}>
               <CollapsibleTrigger className="flex w-full items-center justify-between rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground">
-                <span>高级设置</span>
+                <span>{t("sessions:advanced.title")}</span>
                 <ChevronDown className={cn("size-3 transition-transform", isAdvancedOpen && "rotate-180")} />
               </CollapsibleTrigger>
               <CollapsibleContent>
                 <div className="flex items-center justify-between px-2 py-2">
-                  <span className="text-xs text-muted-foreground">思考模式</span>
+                  <span className="text-xs text-muted-foreground">{t("sessions:advanced.thinkingMode")}</span>
                   <Switch
                     checked={thinking}
                     onCheckedChange={setThinking}
-                    aria-label="开启思考模式"
+                    aria-label={t("sessions:advanced.enableThinking")}
                   />
                 </div>
               </CollapsibleContent>
@@ -389,21 +391,25 @@ export function CreateSessionDialog({
       <AlertDialog open={showConfirmCreate} onOpenChange={setShowConfirmCreate}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Directory Not Found</AlertDialogTitle>
+            <AlertDialogTitle>{t("sessions:createDir.title")}</AlertDialogTitle>
             <AlertDialogDescription>
-              The directory{" "}
-              <code className="bg-muted px-1 py-0.5 rounded text-foreground break-all">
-                {pendingPath}
-              </code>{" "}
-              does not exist. Would you like to create it?
+              <Trans
+                i18nKey="sessions:createDir.body"
+                values={{ path: pendingPath }}
+                components={{
+                  pathCode: (
+                    <code className="bg-muted px-1 py-0.5 rounded text-foreground break-all" />
+                  ),
+                }}
+              />
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel onClick={handleCancelCreateDir}>
-              Cancel
+              {t("common:actions.cancel")}
             </AlertDialogCancel>
             <AlertDialogAction onClick={handleConfirmCreateDir}>
-              Create Directory
+              {t("sessions:createDir.create")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

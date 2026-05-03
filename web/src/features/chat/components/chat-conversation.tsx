@@ -17,6 +17,7 @@ import {
   SparklesIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { hasPlatformModifier, isMacOS } from "@/hooks/utils";
 import {
   VirtualizedMessageList,
@@ -54,6 +55,7 @@ export function ChatConversation({
   onSearchOpenChange,
   onForkSession,
 }: ChatConversationProps) {
+  const { t } = useTranslation("chat");
   const listRef = useRef<VirtualizedMessageListHandle>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [highlightedIndex, setHighlightedIndex] = useState(-1);
@@ -116,7 +118,7 @@ export function ChatConversation({
           <ConversationEmptyState
             description=""
             icon={<Loader2Icon className="size-6 animate-spin text-primary" />}
-            title={isStartingEnvironment ? "Starting environment..." : "Connecting to session..."}
+            title={isStartingEnvironment ? t("conversation.startingEnv") : t("conversation.connectingSession")}
           />
         ) : emptyNoSessionState ? (
           <ConversationEmptyState>
@@ -125,10 +127,10 @@ export function ChatConversation({
             </div>
             <div className="text-center">
               <p className="text-lg font-medium text-foreground">
-                Create a session to begin
+                {t("conversation.createSessionTitle")}
               </p>
               <p className="mt-1 text-sm text-muted-foreground">
-                Click the + button in the sidebar to start a new session
+                {t("conversation.createSessionHint")}
               </p>
             </div>
             {onCreateSession ? (
@@ -148,12 +150,12 @@ export function ChatConversation({
                     }}
                   >
                     <PlusIcon className="size-4" />
-                    <span>Create new session</span>
+                    <span>{t("conversation.createNewSession")}</span>
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent className="flex flex-col items-center gap-1" side="top">
                   <div className="flex items-center gap-2">
-                    <span>Create new session</span>
+                    <span>{t("conversation.createNewSession")}</span>
                     <KbdGroup>
                       <Kbd>Shift</Kbd>
                       <span className="text-muted-foreground">+</span>
@@ -163,7 +165,7 @@ export function ChatConversation({
                     </KbdGroup>
                   </div>
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <span>{newSessionShortcutModifier}+Click to open in new tab</span>
+                    <span>{t("conversation.newTabHint", { modifier: newSessionShortcutModifier })}</span>
                   </div>
                 </TooltipContent>
               </Tooltip>
@@ -172,7 +174,7 @@ export function ChatConversation({
         ) : emptySessionState ? (
           <div className="flex h-full items-center justify-center">
             <p className="text-sm text-muted-foreground">
-              Start a conversation...
+              {t("conversation.startConversation")}
             </p>
           </div>
         ) : null

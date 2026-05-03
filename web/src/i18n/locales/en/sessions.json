@@ -1,0 +1,67 @@
+{
+  "advanced": {
+    "title": "Advanced settings",
+    "thinkingMode": "Thinking mode",
+    "enableThinking": "Enable thinking mode"
+  },
+  "create": {
+    "title": "Create New Session",
+    "description": "Search directories or type a new path",
+    "placeholder": "Search directories or type a path...",
+    "emptyNoMatch": "No matching directories.",
+    "emptyLoading": "Loading directories...",
+    "emptyTypePath": "Type a path to start a new session.",
+    "groupCustom": "Custom Path",
+    "groupCurrent": "Current Directory",
+    "groupRecent": "Recent Directories",
+    "tooltip": {
+      "title1": "New session",
+      "title2": "New session here",
+      "body": "Click to open in new tab"
+    }
+  },
+  "delete_dialog": {
+    "title": "Delete Session",
+    "body": "Are you sure you want to delete \"{{name}}\"? This action cannot be undone.",
+    "cancel": "Cancel",
+    "confirm": "Delete"
+  }, 
+  "createDir": {
+    "title": "Directory Not Found",
+    "body": "The directory <pathCode>{{path}}</pathCode> does not exist. Would you like to create it?",
+    "create": "Create Directory"
+  },
+  "archive": {
+    "gray": "No memory saved yet",
+    "in_progress": "Recording memory…",
+    "green": "Memory up to date",
+    "yellow": "Has new activity since last memory",
+    "red": "Last save failed"
+  },
+  "search": {
+    "placeholder": "Search sessions..."
+  },
+  "archived": {
+    "title": "Archived",
+    "label_no": "No archived sessions"
+  },
+  "action": {
+    "rename": "Rename",
+    "archive": "Archive",
+    "unarchive": "Unarchive",
+    "record_memory": "Record memory",
+    "select_multiple": "Select Multiple",
+    "delete": "Delete Session"
+  },
+  "memory": {
+    "in_progress_dialog": {
+      "title": "Memory recording in progress",
+      "body": "Memory recording is already in progress for this session. Please wait."
+    },
+    "up_to_date_dialog": {
+      "title": "Memory already up to date",
+      "body": "Memory is already up to date. Send a new message in this session before re-recording."
+    },
+    "confirm": "Got it"
+  }
+}

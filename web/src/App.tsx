@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChatStatus } from "ai";
+import { useTranslation } from "react-i18next";
 import { PromptInputProvider } from "@ai-elements";
 import { toast } from "sonner";
 import { PanelLeftOpen, PanelLeftClose, LogOut, ShieldCheck } from "lucide-react";
@@ -20,6 +21,7 @@ import {
 import type { MemoryEvent } from "./hooks/useMemory";
 import { useTheme } from "./hooks/use-theme";
 import { ThemeToggle } from "./components/ui/theme-toggle";
+import { LanguageToggle } from "./components/ui/language-toggle";
 import type { SessionStatus } from "./lib/api/models";
 import type { PanelSize, PanelImperativeHandle } from "react-resizable-panels";
 import { consumeAuthTokenFromUrl, setAuthToken } from "./lib/auth";
@@ -57,6 +59,7 @@ const SIDEBAR_ANIMATION_MS = 250;
 function App() {
   // Initialize theme on app startup
   useTheme();
+  const { t } = useTranslation(["toasts", "common"]);
 
   // Branding context
   const { config: brandingConfig } = useBranding();
@@ -288,11 +291,11 @@ function App() {
   // Show toast notifications for errors
   useEffect(() => {
     if (sessionsError) {
-      toast.error("Session Error", {
+      toast.error(t("toasts:session.errorTitle"), {
         description: sessionsError,
       });
     }
-  }, [sessionsError]);
+  }, [sessionsError, t]);
 
   const handleStreamStatusChange = useCallback((nextStatus: ChatStatus) => {
     setStreamStatus(nextStatus);
@@ -411,14 +414,14 @@ function App() {
           return next;
         });
         refreshRecentSummaries();
-        toast.success("Memory saved");
+        toast.success(t("toasts:memory.savedTitle"));
       } else {
-        const message = event.error || "Failed to record memory";
+        const message = event.error || t("toasts:memory.fallbackError");
         setArchiveErrors((prev) => new Map(prev).set(sessionId, message));
         toast.error(message);
       }
     },
-    [refreshRecentSummaries],
+    [refreshRecentSummaries, t],
   );
   useMemoryEvents(memoryEventHandler);
 
@@ -533,10 +536,10 @@ function App() {
     archiveStartedAtRef.current.set(sessionId, Date.now());
     try {
       await archiveSessionMemory(sessionId);
-      toast("Recording memory in background…");
+      toast(t("toasts:memory.recordingInBackground"));
     } catch (e) {
       const message =
-        e instanceof Error ? e.message : "Failed to start memory recording";
+        e instanceof Error ? e.message : t("toasts:memory.startFallbackError");
       setArchiveInFlight((prev) => {
         if (!prev.has(sessionId)) return prev;
         const next = new Set(prev);
@@ -547,7 +550,7 @@ function App() {
       setArchiveErrors((prev) => new Map(prev).set(sessionId, message));
       toast.error(message);
     }
-  }, []);
+  }, [t]);
 
   // Auth gates: loading, unauthenticated, admin route
   if (isAuthLoading && !currentUser) {
@@ -646,7 +649,7 @@ function App() {
                   </a>
                   <button
                     type="button"
-                    aria-label="Expand sidebar"
+                    aria-label={t("common:sidebar.expand")}
                     className="mt-auto mb-1 inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary/50 hover:text-foreground"
                     onClick={handleExpandSidebar}
                   >
@@ -699,7 +702,7 @@ function App() {
                       {isAdmin && (
                         <a
                           href="/admin"
-                          title="Admin Panel"
+                          title={t("common:user.adminPanel")}
                           className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary/50 hover:text-foreground shrink-0"
                         >
                           <ShieldCheck className="size-3.5" />
@@ -707,22 +710,23 @@ function App() {
                       )}
                       <button
                         type="button"
-                        title="Sign out"
-                        aria-label="Sign out"
+                        title={t("common:user.signOut")}
+                        aria-label={t("common:user.signOut")}
                         className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary/50 hover:text-foreground shrink-0"
                         onClick={handleLogout}
                       >
                         <LogOut className="size-3.5" />
                       </button>
                     </div>
-                    {/* Theme toggle + collapse */}
+                    {/* Theme toggle + language toggle + collapse */}
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <ThemeToggle />
+                        <LanguageToggle />
                       </div>
                       <button
                         type="button"
-                        aria-label="Collapse sidebar"
+                        aria-label={t("common:sidebar.collapse")}
                         className="inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary/50 hover:text-foreground"
                         onClick={handleCollapseSidebar}
                       >
@@ -764,7 +768,7 @@ function App() {
           <button
             type="button"
             className="absolute inset-0 bg-black/40"
-            aria-label="Close sessions sidebar"
+            aria-label={t("common:sidebar.close")}
             onClick={handleCloseMobileSidebar}
           />
           <div className="relative flex h-full w-[min(86vw,360px)] flex-col border-r border-border bg-background pt-[var(--safe-top)] shadow-2xl">
@@ -807,7 +811,7 @@ function App() {
                 {isAdmin && (
                   <a
                     href="/admin"
-                    title="Admin Panel"
+                    title={t("common:user.adminPanel")}
                     className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary/50 hover:text-foreground shrink-0"
                   >
                     <ShieldCheck className="size-3.5" />
@@ -815,15 +819,18 @@ function App() {
                 )}
                 <button
                   type="button"
-                  title="Sign out"
-                  aria-label="Sign out"
+                  title={t("common:user.signOut")}
+                  aria-label={t("common:user.signOut")}
                   className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary/50 hover:text-foreground shrink-0"
                   onClick={handleLogout}
                 >
                   <LogOut className="size-3.5" />
                 </button>
               </div>
-              <ThemeToggle />
+              <div className="flex flex-col items-center gap-2">
+                <ThemeToggle />
+                <LanguageToggle />
+              </div>
             </div>
           </div>
         </div>
