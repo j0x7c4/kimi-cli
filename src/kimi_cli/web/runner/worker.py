@@ -22,6 +22,7 @@ from kimi_cli.agentspec import resolve_subagent_yaml
 from kimi_cli.app import KimiCLI, enable_logging
 from kimi_cli.cli.mcp import get_global_mcp_config_file
 from kimi_cli.exception import MCPConfigError
+from kimi_cli.web.runner.mcp_discovery import load_auto_discovered_mcp_configs
 from kimi_cli.web.store.sessions import load_session_by_id
 
 
@@ -58,6 +59,20 @@ async def run_worker(session_id: UUID) -> None:
                 "Invalid JSON in MCP config file: {path}",
                 path=default_mcp_file,
             )
+
+    # hechun (avocado) integration: also load any auto-discovered MCP
+    # configs from ``~/.config/agents/mcp.json`` (the hechun bundle's
+    # mount target).  Done after the global config so a deliberate
+    # global entry can still shadow an auto-discovered one if names
+    # collide (the existing kimi MCP loader is first-write-wins).
+    #
+    # ``${VAR}`` placeholders in the auto-discovered file are
+    # substituted from ``os.environ`` here so a single yaml shipped
+    # with the skill bundle can serve different sessions (different
+    # ``HECHUN_MCP_TOKEN``s, etc.) without per-session rendering.
+    auto_mcp_configs = load_auto_discovered_mcp_configs()
+    if auto_mcp_configs:
+        mcp_configs.extend(auto_mcp_configs)
 
     # Detect whether this is a resumed session (has prior state on disk)
     # vs a brand-new session that should honor config.default_plan_mode.
