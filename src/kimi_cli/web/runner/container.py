@@ -46,6 +46,32 @@ def _read_owner_id_from_disk(session_id: UUID) -> str | None:
     return None
 
 
+def _read_subagent_from_disk(session_id: UUID) -> str | None:
+    """Read the ``subagent`` field from this session's ``session_config.json``.
+
+    Used by the container runner to forward a ``SUBAGENT`` env var into the
+    sandbox so kimi-cli can pick the right agent yaml at startup.  Mirrors
+    the disk-glob pattern of :func:`_read_owner_id_from_disk` because the
+    work-dir hash is unknown here.
+    """
+    share = os.environ.get("KIMI_SHARE_DIR")
+    if not share:
+        return None
+    sessions_root = Path(share) / "sessions"
+    if not sessions_root.is_dir():
+        return None
+    for cfg_file in sessions_root.glob(f"*/{session_id}/session_config.json"):
+        try:
+            data = json.loads(cfg_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        value = data.get("subagent")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return None
+    return None
+
+
 # Environment variable names to forward into sandbox containers
 _SANDBOX_ENV_VARS = [
     # LLM configuration
@@ -84,6 +110,19 @@ _SANDBOX_ENV_VARS = [
     "HF_TOKEN",
     "HUGGINGFACE_HUB_CACHE",
     "TRANSFORMERS_CACHE",
+    # hechun (avocado) integration -- see custom-skills/hechun/README.md.
+    # ``HECHUN_INTERNAL_BASE_URL`` and ``INTERNAL_API_TOKEN`` let hechun
+    # HTTP-runtime skills (bolus_calc, bg_interpret, ...) reach the backend.
+    # ``HECHUN_MCP_URL`` and ``HECHUN_MCP_TOKEN`` are consumed by the MCP
+    # client config that exposes the 10 read-only data tools to the LLM.
+    # ``KIMI_USER_ID`` is already injected from disk-resolved owner_id
+    # elsewhere in this file; the values above are passed through from
+    # the gateway process env so the same upstream knobs work in both
+    # local and container mode.
+    "HECHUN_INTERNAL_BASE_URL",
+    "INTERNAL_API_TOKEN",
+    "HECHUN_MCP_URL",
+    "HECHUN_MCP_TOKEN",
 ]
 
 
@@ -240,6 +279,14 @@ class ContainerSessionProcess(SessionProcess):
         # real users' data.
         owner_id_raw = _read_owner_id_from_disk(self.session_id)
         cmd.extend(["-e", f"KIMI_USER_ID={resolve_owner_id(owner_id_raw)}"])
+
+        # Forward per-session ``subagent`` selection (e.g. hechun avocado picks
+        # ``diabetes-expert``).  kimi-cli inside the sandbox is expected to
+        # pick the matching ``custom-skills/hechun/subagents/<name>.yaml`` at
+        # startup.  When unset, sandbox falls back to the default agent.
+        subagent = _read_subagent_from_disk(self.session_id)
+        if subagent:
+            cmd.extend(["-e", f"SUBAGENT={subagent}"])
 
         # Image + entrypoint command (runs start-sandbox.sh which launches
         # Xvfb, kernel server, browser guard, and finally the worker)
