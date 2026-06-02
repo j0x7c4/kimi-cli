@@ -245,6 +245,50 @@ def discover_user_agent_specs(work_dir: Path) -> list[DiscoveredSpec]:
     return list(seen.values())
 
 
+def resolve_subagent_yaml(name: str, *, work_dir: Path | None = None) -> Path | None:
+    """Find the on-disk yaml for a subagent referenced by *name*.
+
+    Used by the sandbox worker to honour the ``SUBAGENT`` env var: hechun /
+    avocado picks ``diabetes-expert``, the gateway forwards it into the
+    container, and this helper turns that string into a concrete agent spec
+    path so :func:`kimi_cli.app.KimiCLI.create` can load it.
+
+    Lookup order (first match wins):
+
+    1. ``~/.config/agents/skills/*/subagents/<name>.yaml`` — generic ``agents``
+       skill bundles mounted under the user config tree (the hechun shape).
+    2. ``~/.config/agents/subagents/<name>.yaml`` — a flat fallback for
+       bundles that don't follow the per-skill nesting.
+    3. ``discover_user_agent_specs(work_dir)`` — preserves backwards compat
+       with the ``~/.kimi/agents`` / project-local ``.kimi/agents`` paths used
+       by stand-alone kimi-cli users.
+
+    Returns ``None`` when nothing matches; callers decide whether to fail
+    fast (sandbox worker does) or silently fall back (CLI does).
+    """
+    # Layer 1 + 2: ``~/.config/agents/...`` paths (sandbox-mount convention
+    # for hechun and any other agent-bundle-style skills).  We glob the
+    # skill-nested layout first because it's the project-specific shape we
+    # actively promote; the flat fallback is a cheap belt-and-suspenders so
+    # users who don't follow the nested pattern still work.
+    config_root = Path.home() / ".config" / "agents"
+    for candidate in sorted(config_root.glob(f"skills/*/subagents/{name}.yaml")):
+        if candidate.is_file():
+            return candidate
+    flat_candidate = config_root / "subagents" / f"{name}.yaml"
+    if flat_candidate.is_file():
+        return flat_candidate
+
+    # Layer 3: existing kimi-cli discovery (project + ``~/.kimi/agents``).
+    # ``discover_user_agent_specs`` requires a ``work_dir``; the worker passes
+    # one in, but other callers (tests) may not -- fall back to cwd.
+    wd = work_dir if work_dir is not None else Path.cwd()
+    for spec in discover_user_agent_specs(wd):
+        if spec.name == name:
+            return spec.path
+    return None
+
+
 def _read_spec_name(path: Path) -> str | None:
     try:
         with open(path, encoding="utf-8") as f:

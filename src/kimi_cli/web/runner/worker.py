@@ -11,16 +11,29 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 from kimi_cli import logger
+from kimi_cli.agentspec import resolve_subagent_yaml
 from kimi_cli.app import KimiCLI, enable_logging
 from kimi_cli.cli.mcp import get_global_mcp_config_file
 from kimi_cli.exception import MCPConfigError
 from kimi_cli.web.store.sessions import load_session_by_id
+
+
+class SubagentNotFoundError(RuntimeError):
+    """Raised when the sandbox is launched with a ``SUBAGENT`` env var that
+    does not resolve to an agent spec yaml on disk.
+
+    The sandbox worker treats this as fatal — silently falling back to the
+    default agent would hide a misconfiguration (e.g. hechun broker injected
+    ``SUBAGENT=diabetes-expert`` but the skill bundle wasn't mounted) and let
+    the wrong system prompt + tool set serve real users.
+    """
 
 
 async def run_worker(session_id: UUID) -> None:
@@ -70,6 +83,41 @@ async def run_worker(session_id: UUID) -> None:
                 f"Agent spec file recorded in session_config.json no longer exists: {_path}"
             )
         agent_file = _path
+
+    # hechun (avocado) integration: when the gateway started this sandbox
+    # with ``SUBAGENT=<name>``, look up the matching subagent yaml and use it
+    # as the top-level agent spec for this session.
+    #
+    # Resolution order: ``~/.config/agents/skills/*/subagents/<name>.yaml``
+    # (the canonical sandbox-mount path; see spec §3.4) wins over the
+    # generic ``~/.kimi/agents`` shape so a hechun-bundled spec always beats
+    # a stray user-level file with the same name.
+    #
+    # Fail-fast on miss: silently falling back to the default agent would
+    # hide a real misconfiguration (broker selected ``diabetes-expert`` but
+    # the bundle wasn't mounted) and serve users the wrong system prompt.
+    subagent_name = os.environ.get("SUBAGENT", "").strip()
+    if subagent_name:
+        subagent_path = resolve_subagent_yaml(subagent_name, work_dir=Path(str(session.work_dir)))
+        if subagent_path is None:
+            logger.error(
+                "SUBAGENT={name} requested but no matching agent yaml found "
+                "(checked ~/.config/agents/skills/*/subagents/{name}.yaml, "
+                "~/.config/agents/subagents/{name}.yaml, and "
+                "discover_user_agent_specs). Refusing to fall back silently.",
+                name=subagent_name,
+            )
+            raise SubagentNotFoundError(
+                f"SUBAGENT={subagent_name!r} did not resolve to an agent spec; "
+                "check that the skill bundle is mounted at "
+                f"~/.config/agents/skills/<bundle>/subagents/{subagent_name}.yaml."
+            )
+        logger.info(
+            "SUBAGENT={name} resolved to {path}",
+            name=subagent_name,
+            path=subagent_path,
+        )
+        agent_file = subagent_path
 
     # Create KimiCLI instance with MCP configuration
     try:
