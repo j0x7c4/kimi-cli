@@ -250,6 +250,12 @@ class ContainerSessionProcess(SessionProcess):
         if custom_skills:
             cmd.extend(["-v", f"{custom_skills}:/root/.config/agents/skills:ro"])
 
+        # Mount user agent specs directory (for subagent yaml discovery).
+        # kimi-cli's agentspec.discover() searches ~/.kimi/agents at sandbox startup.
+        custom_agents = os.environ.get("CUSTOM_AGENTS_HOST_PATH")
+        if custom_agents:
+            cmd.extend(["-v", f"{custom_agents}:/root/.kimi/agents:ro"])
+
         # Mount HuggingFace cache directory if configured
         hf_cache = os.environ.get("HF_CACHE_HOST_PATH")
         if hf_cache:
