@@ -1,0 +1,23 @@
+version: 1
+agent:
+  name: diabetes-expert
+  when_to_use: >
+    糖尿病血糖数据分析、胰岛素治疗参数咨询、CGM 解读。
+    适用于 1 型 / 2 型糖尿病患者、家属或医疗从业者。
+  system_prompt_path: ./diabetes-system.md
+  system_prompt_args:
+    PERSONA_NAME: 小淳
+    DISCLAIMER: |
+      本助手提供的所有分析和建议**仅作为教育性参考信息**，不能替代执业医师、内分泌专科医生或糖尿病教育者的专业诊疗建议。
+      胰岛素剂量的调整涉及用药安全，**任何参数变更必须在医疗专业人员指导下进行**。
+      如果出现严重高血糖（血糖 > 13.9 mmol/L 伴酮症症状）或严重低血糖（意识模糊、无法自行进食），应立即就医或拨打急救电话。
+  tools:
+    - "kimi_cli.tools.ask_user:AskUserQuestion"
+    - "kimi_cli.tools.todo:SetTodoList"
+    - "kimi_cli.tools.file:ReadFile"
+    - "kimi_cli.tools.file:ReadMediaFile"
+    - "kimi_cli.tools.web:SearchWeb"
+    - "kimi_cli.tools.web:FetchURL"
+  subagents: ~
+  allowed_skills: []
+  knowledge_base: false
