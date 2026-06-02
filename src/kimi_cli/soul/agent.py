@@ -473,6 +473,14 @@ async def load_agent(
         tools = [tool for tool in tools if tool not in agent_spec.exclude_tools]
     toolset.load_tools(tools, tool_deps)
 
+    # ---- HTTP-runtime skills (custom-skills/<name>/tool.yaml) ----
+    # Skills shipped with a ``tool.yaml`` describing ``runtime.type: http``
+    # are registered as real callable tools so the LLM can invoke them via
+    # HTTPS (the hechun pattern: bolus_calc, bg_interpret, ...).  Honour
+    # the agent spec's skill allow/exclude filter so an agent that doesn't
+    # opt into hechun skills doesn't end up with them in its toolset.
+    _register_http_skill_tools(toolset, runtime, agent_spec)
+
     # Load plugin tools
     from kimi_cli.plugin.manager import get_plugins_dir
     from kimi_cli.plugin.tool import load_plugin_tools
@@ -577,3 +585,68 @@ def _load_system_prompt(
         raise SystemPromptTemplateError(f"Missing system prompt arg in {path}: {exc}") from exc
     except TemplateError as exc:
         raise SystemPromptTemplateError(f"Invalid system prompt template: {path}: {exc}") from exc
+
+
+def _register_http_skill_tools(
+    toolset: KimiToolset, runtime: Runtime, agent_spec: ResolvedAgentSpec
+) -> None:
+    """Register one ``HTTPSkillRuntime`` per discovered ``tool.yaml`` sibling.
+
+    Skills live in directories surfaced by ``Runtime.create`` and stored
+    in ``runtime.skills``; each ``Skill.dir`` is the directory that owns
+    the skill, so we look for ``<dir>/tool.yaml`` next to ``SKILL.md``.
+
+    The agent's ``allowed_skills`` / ``excluded_skills`` filter is applied
+    first so an agent that didn't opt into a skill's *prompt* description
+    doesn't end up with its *callable runtime* either — keeps the LLM's
+    visible toolset and the system-prompt skill list in agreement.
+
+    Name conflicts (a built-in tool of the same name) are skipped with a
+    warning; this matches the plugin-tool policy a few lines above.
+    """
+    if not runtime.skills:
+        return
+
+    # Honour spec-level allow/exclude lists.  ``filter_skills`` accepts
+    # ``allowed=None`` as "no allowlist", so unfiltered agents still see
+    # all HTTP skills.
+    candidate_skills = filter_skills(
+        list(runtime.skills.values()),
+        allowed=agent_spec.allowed_skills,
+        excluded=agent_spec.excluded_skills,
+    )
+
+    skill_dirs: list[Path] = []
+    for skill in candidate_skills:
+        try:
+            local_path = Path(str(skill.dir))
+        except (ValueError, OSError) as exc:
+            logger.warning(
+                "Skipping HTTP skill discovery under {dir}: {error}",
+                dir=skill.dir,
+                error=exc,
+            )
+            continue
+        skill_dirs.append(local_path)
+
+    # Late import: keeps ``soul.agent`` cold-start cost down for the
+    # common case where no HTTP skills are mounted.
+    from kimi_cli.soul.http_skill_runtime import (
+        HTTPSkillRuntime,
+        discover_http_skill_specs,
+    )
+
+    specs = discover_http_skill_specs(skill_dirs)
+    for spec in specs:
+        if toolset.find(spec.name) is not None:
+            logger.warning(
+                "HTTP skill tool `{name}` conflicts with an existing tool, skipping",
+                name=spec.name,
+            )
+            continue
+        logger.info(
+            "Registering HTTP skill tool: {name} → {url}",
+            name=spec.name,
+            url=spec.runtime.url,
+        )
+        toolset.add(HTTPSkillRuntime(spec))
