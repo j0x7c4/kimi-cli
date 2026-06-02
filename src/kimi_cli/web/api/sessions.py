@@ -382,12 +382,16 @@ async def create_session(
     kimi_cli_session = await KimiCLISession.create(work_dir=work_dir)
     context_file = kimi_cli_session.dir / "context.jsonl"
 
-    # Persist per-session config (thinking override + agent spec path)
+    # Persist per-session config (thinking override + agent spec path + subagent)
     _cfg: dict[str, Any] = {}
     if request is not None and request.thinking is not None:
         _cfg["thinking"] = request.thinking
     if agent_spec_path is not None:
         _cfg["agent_spec_path"] = str(agent_spec_path)
+    # Persist subagent identifier so the sandbox runner can forward it as env.
+    # See ``CreateSessionRequest.subagent``.
+    if request is not None and request.subagent:
+        _cfg["subagent"] = request.subagent
     if _cfg:
         (kimi_cli_session.dir / "session_config.json").write_text(
             json.dumps(_cfg), encoding="utf-8"
@@ -432,6 +436,12 @@ class CreateSessionRequest(BaseModel):
     create_dir: bool = False  # Whether to auto-create directory if it doesn't exist
     thinking: bool | None = None  # Per-session thinking override; None = use global config
     agent_name: str | None = None  # Name of a discovered agent spec
+    # Optional subagent identifier for downstream integrations (e.g. hechun
+    # avocado picks "diabetes-expert").  Persisted to ``session_config.json``
+    # and forwarded to the sandbox container as ``SUBAGENT`` env var so
+    # ``kimi-cli`` inside the sandbox can load the matching ``*.yaml``.
+    # Empty string is treated as ``None``.
+    subagent: str | None = None
 
 
 class ForkSessionRequest(BaseModel):
@@ -848,6 +858,155 @@ async def delete_session(session_id: UUID, runner: KimiCLIRunner = Depends(get_r
     if session_dir.exists():
         shutil.rmtree(session_dir)
     invalidate_sessions_cache()
+
+
+class StopSessionResponse(BaseModel):
+    """Response of :func:`stop_session`."""
+
+    session_id: UUID
+    stopped: bool
+    detail: str | None = None
+
+
+@router.post("/{session_id}/stop", summary="Stop a session's sandbox / worker")
+async def stop_session(
+    session_id: UUID,
+    runner: KimiCLIRunner = Depends(get_runner),
+) -> StopSessionResponse:
+    """Stop a session's sandbox container / worker subprocess.
+
+    Unlike :func:`delete_session`, this does **not** remove the session
+    directory or invalidate state; the session can be re-opened later and
+    will start a fresh container.
+
+    Used by upstream integrators (e.g. hechun avocado backend's
+    ``SandboxBroker`` idle sweeper) to reclaim per-user sandbox resources
+    after an idle timeout without losing the session's persisted history.
+
+    Returns 200 with ``stopped=False`` if the session exists but has no
+    running worker (this is intentionally idempotent so callers can retry
+    safely).  Returns 404 if the session itself is not found.
+    """
+    session = load_session_by_id(session_id)
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found",
+        )
+    session_process = runner.get_session(session_id)
+    if session_process is None:
+        return StopSessionResponse(
+            session_id=session_id,
+            stopped=False,
+            detail="No active worker for this session.",
+        )
+    try:
+        await session_process.stop()
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning(
+            "Failed to stop session {sid}: {e}",
+            sid=session_id,
+            e=f"{e.__class__.__name__}: {e}",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to stop session: {e}",
+        ) from e
+    return StopSessionResponse(session_id=session_id, stopped=True)
+
+
+class MemoryTailLine(BaseModel):
+    """A single line from the user's persistent.jsonl memory file."""
+
+    line_no: int  # 1-based
+    content: str  # raw JSON line (caller decodes if it wants structured form)
+
+
+class MemoryTailResponse(BaseModel):
+    """Response of :func:`get_session_memory_tail`."""
+
+    lines: list[MemoryTailLine]
+    last_line_no: int
+    # Echo of the resolved owner_id so callers can sanity-check they hit
+    # the right user's memory (e.g. ``__anonymous__`` vs real user id).
+    owner_id: str
+
+
+def _read_memory_tail_sync(
+    owner_id: str | None,
+    after_line: int,
+    max_lines: int,
+) -> MemoryTailResponse:
+    """Read ``persistent.jsonl`` starting *after* ``after_line``.
+
+    Lines are 1-based. ``after_line=0`` returns the whole file.  Empty / blank
+    lines are skipped but still consume a line number so multiple consumers
+    can converge on the same ``last_line_no``.
+    """
+    from kimi_cli.memory.paths import (
+        get_persistent_memory_file,
+        resolve_owner_id,
+    )
+
+    resolved = resolve_owner_id(owner_id)
+    path = get_persistent_memory_file(resolved)
+    out: list[MemoryTailLine] = []
+    last_line_no = max(after_line, 0)
+    if not path.is_file():
+        return MemoryTailResponse(lines=out, last_line_no=last_line_no, owner_id=resolved)
+    with open(path, encoding="utf-8") as f:
+        for i, raw in enumerate(f, start=1):
+            last_line_no = i
+            if i <= after_line:
+                continue
+            stripped = raw.rstrip("\n")
+            if not stripped.strip():
+                continue
+            out.append(MemoryTailLine(line_no=i, content=stripped))
+            if len(out) >= max_lines:
+                # Caller can keep paging from ``last_line_no``.
+                break
+    return MemoryTailResponse(lines=out, last_line_no=last_line_no, owner_id=resolved)
+
+
+@router.get(
+    "/{session_id}/memory_tail",
+    summary="Read the session owner's persistent.jsonl from a given line offset",
+)
+async def get_session_memory_tail(
+    session_id: UUID,
+    after_line: int = 0,
+    limit: int = 500,
+) -> MemoryTailResponse:
+    """Incremental tail of ``$KIMI_SHARE_DIR/users/<owner>/memory/persistent.jsonl``.
+
+    Designed for the hechun avocado backend's ``MemorySyncJob`` to pull new
+    memory entries every ~60s without re-reading the whole file.  Returns
+    only lines whose 1-based number is **greater than** ``after_line``;
+    bounded by ``limit`` (defaults to 500, capped at 5000).
+
+    The lookup picks the session's persisted ``owner_id`` (set when the
+    session was created by an authenticated user) and routes to that user's
+    private memory dir.  Anonymous sessions return the ``__anonymous__``
+    bucket.
+
+    No authentication enforced at this endpoint — it's expected to live
+    behind the same ``KIMI_WEB_SESSION_TOKEN`` gate as the rest of the API.
+    """
+    if after_line < 0:
+        after_line = 0
+    if limit <= 0:
+        limit = 500
+    if limit > 5000:
+        limit = 5000
+    session = load_session_by_id(session_id)
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found",
+        )
+    owner_id = getattr(session, "owner_id", None)
+    return await asyncio.to_thread(_read_memory_tail_sync, owner_id, after_line, limit)
 
 
 @router.patch("/{session_id}", summary="Update session")
