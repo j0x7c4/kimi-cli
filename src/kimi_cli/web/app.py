@@ -179,6 +179,19 @@ def create_app(
         app.state.max_public_path_depth = max_public_path_depth
         app.state.lan_only = lan_only
 
+        # Storage backend (spec §2.4.2.C): file (default) or postgres. Selected
+        # by env KIMI_STORAGE_BACKEND; downstream task ⑥/⑦/⑧ will switch
+        # session_state / archivist / sessions to consume app.state.kimo_storage
+        # instead of calling file IO helpers directly. Failure here is fatal:
+        # a misconfigured pg URL must not silently fall back to file IO.
+        from kimi_cli.storage import build_storage
+
+        app.state.kimo_storage = build_storage()
+        logger.info(
+            "[create_app] kimo_storage backend={cls}",
+            cls=type(app.state.kimo_storage).__name__,
+        )
+
         # Start KimiCLI runner (containerized or local)
         use_containers = _load_env_flag("KIMI_USE_CONTAINERS")
         if use_containers and ContainerRunner is not None:
