@@ -397,16 +397,45 @@ async def create_session(
             json.dumps(_cfg), encoding="utf-8"
         )
 
-    # Persist owner_id so session list filtering works correctly
+    # M4 §2.4.2.D: resolve owner_id with three priorities:
+    #   ① cookie current_user  > ② body.owner_id (service-account) > ③ None (anonymous fallback)
+    # Cookie current_user wins so the webui multi-user path cannot be spoofed
+    # by a malicious body.owner_id; service-account callers (backend → kimo,
+    # no cookie) fall through to body.owner_id; dev / unauthenticated stays
+    # ownerless and lands under the ``__anonymous__`` sentinel in storage.
     from kimi_cli.web.user_auth import get_current_user as _get_current_user
 
     current_user = _get_current_user(http_request)
+    resolved_owner_id: str | None
     if current_user is not None:
-        from kimi_cli.session_state import load_session_state, save_session_state
+        resolved_owner_id = current_user["id"]
+    elif request is not None and request.owner_id:
+        resolved_owner_id = request.owner_id
+    else:
+        resolved_owner_id = None
+
+    if resolved_owner_id is not None:
+        # Persist via the active KimoStorage backend (file or pg). Falls back
+        # to direct Path helpers if the app didn't wire kimo_storage (older
+        # test harnesses) so we keep upstream tests green.
+        from kimi_cli.session_state import (
+            load_session_state,
+            save_session_state,
+            save_session_state_via_storage,
+        )
 
         _state = load_session_state(kimi_cli_session.dir)
-        _state.owner_id = current_user["id"]
-        save_session_state(_state, kimi_cli_session.dir)
+        _state.owner_id = resolved_owner_id
+        storage = getattr(http_request.app.state, "kimo_storage", None)
+        if storage is not None:
+            save_session_state_via_storage(
+                _state,
+                UUID(kimi_cli_session.id),
+                storage,
+                owner_id=resolved_owner_id,
+            )
+        else:
+            save_session_state(_state, kimi_cli_session.dir)
 
     invalidate_sessions_cache()
     invalidate_work_dirs_cache()
@@ -442,6 +471,11 @@ class CreateSessionRequest(BaseModel):
     # ``kimi-cli`` inside the sandbox can load the matching ``*.yaml``.
     # Empty string is treated as ``None``.
     subagent: str | None = None
+    # M4 §2.4.2.D: service-account 通道（hechun-backend Bearer Token →
+    # KimoGatewayClient）允许 body 携带 owner_id（命名空间约定:
+    # ``hechun-<bigint>`` / ``webui-<uuid>``）。cookie 多用户场景下被
+    # ``_get_current_user(http_request)`` 解出的 current_user 覆盖。
+    owner_id: str | None = None
 
 
 class ForkSessionRequest(BaseModel):
