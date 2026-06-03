@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field, ValidationError
 
 from kimi_cli.memory.entry import MemoryEntry
 from kimi_cli.utils.io import atomic_json_write
 from kimi_cli.utils.logging import logger
+
+if TYPE_CHECKING:
+    from kimi_cli.storage import KimoStorage
 
 STATE_FILE_NAME = "state.json"
 
@@ -136,3 +140,47 @@ def load_session_state(session_dir: Path) -> SessionState:
 def save_session_state(state: SessionState, session_dir: Path) -> None:
     state_file = session_dir / STATE_FILE_NAME
     atomic_json_write(state.model_dump(mode="json"), state_file)
+
+
+# ─── M4 storage-aware helpers (spec §2.4.2.C) ─────────────────────────────
+# Parallel API to ``load_session_state`` / ``save_session_state`` that routes
+# through a :class:`kimi_cli.storage.KimoStorage` instance instead of touching
+# the on-disk session_dir directly. New callers (sessions.py M4 path) should
+# prefer these; existing callers passing ``session_dir: Path`` keep working.
+#
+# Under ``KIMI_STORAGE_BACKEND=file`` these are bit-for-bit equivalent to the
+# Path-based helpers above (the FileKimoStorage backend delegates back into
+# them). Under ``KIMI_STORAGE_BACKEND=postgres`` the state lives in the
+# ``kimo_session_state`` table (hechun-backend Flyway V30).
+
+
+def load_session_state_via_storage(
+    kimo_session_id: UUID, storage: KimoStorage
+) -> SessionState:
+    """Load session state via the configured storage backend.
+
+    Returns a fresh :class:`SessionState` (upstream default) when the backend
+    has no record for ``kimo_session_id`` — same fallback contract as the
+    Path-based ``load_session_state``.
+    """
+    loaded = storage.load_session_state(kimo_session_id)
+    if loaded is None:
+        return SessionState()
+    return loaded
+
+
+def save_session_state_via_storage(
+    state: SessionState,
+    kimo_session_id: UUID,
+    storage: KimoStorage,
+    *,
+    owner_id: str | None = None,
+) -> None:
+    """Save session state via the configured storage backend.
+
+    ``owner_id`` defaults to ``state.owner_id`` — passing it explicitly lets
+    callers (e.g. sessions.create_session) overwrite the field at save time
+    when resolving the three-priority namespace (spec §2.4.2.D).
+    """
+    resolved_owner = owner_id if owner_id is not None else state.owner_id
+    storage.save_session_state(kimo_session_id, resolved_owner, state)

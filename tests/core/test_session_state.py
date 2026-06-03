@@ -457,3 +457,84 @@ class TestApprovalStateCallback:
         approval = Approval(state=state)
         approval.set_yolo(True)  # should not raise
         assert state.yolo is True
+
+
+# ─── M4 storage-aware helpers (spec §2.4.2.C) ─────────────────────────────
+
+
+class TestSessionStateViaStorage:
+    """Round-trip tests for the storage-aware helpers (task B1)."""
+
+    def _make_storage(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """Build a FileKimoStorage with isolated KIMI_SHARE_DIR + one work-dir."""
+        from kimi_cli.metadata import Metadata, WorkDirMeta, save_metadata
+        from kimi_cli.storage.file_storage import FileKimoStorage
+
+        share = tmp_path / "share"
+        share.mkdir()
+        monkeypatch.setenv("KIMI_SHARE_DIR", str(share))
+        monkeypatch.setenv("KIMI_SHARE_HOME", str(share))
+
+        wd_path = share / "project"
+        wd_path.mkdir()
+        wd = WorkDirMeta(path=str(wd_path))
+        save_metadata(Metadata(work_dirs=[wd]))
+        return FileKimoStorage()
+
+    def test_load_returns_fresh_state_when_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Missing session → fresh SessionState (upstream default)."""
+        from uuid import uuid4
+
+        from kimi_cli.session_state import load_session_state_via_storage
+
+        storage = self._make_storage(tmp_path, monkeypatch)
+        state = load_session_state_via_storage(uuid4(), storage)
+        assert isinstance(state, SessionState)
+        assert state.custom_title is None
+        assert state.owner_id is None
+
+    def test_save_then_load_round_trip(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """save_via_storage → load_via_storage round-trips state + owner_id."""
+        from uuid import uuid4
+
+        from kimi_cli.session_state import (
+            load_session_state_via_storage,
+            save_session_state_via_storage,
+        )
+
+        storage = self._make_storage(tmp_path, monkeypatch)
+        sid = uuid4()
+        state = SessionState(
+            custom_title="hechun-m4-test",
+            title_generated=True,
+            owner_id="hechun-7",
+        )
+        save_session_state_via_storage(state, sid, storage)
+
+        loaded = load_session_state_via_storage(sid, storage)
+        assert loaded.custom_title == "hechun-m4-test"
+        assert loaded.title_generated is True
+        assert loaded.owner_id == "hechun-7"
+
+    def test_save_explicit_owner_overrides_state_owner(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Explicit owner_id arg wins over the value on the SessionState."""
+        from uuid import uuid4
+
+        from kimi_cli.session_state import (
+            load_session_state_via_storage,
+            save_session_state_via_storage,
+        )
+
+        storage = self._make_storage(tmp_path, monkeypatch)
+        sid = uuid4()
+        state = SessionState(owner_id=None, custom_title="x")
+        # Save with owner_id explicitly — FileKimoStorage writes it onto state
+        save_session_state_via_storage(state, sid, storage, owner_id="hechun-99")
+        loaded = load_session_state_via_storage(sid, storage)
+        assert loaded.owner_id == "hechun-99"
