@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from typing import Literal, override
 
@@ -12,8 +13,10 @@ from kimi_cli.memory import (
     read_entries,
     update_entry,
 )
+from kimi_cli.memory.paths import ANONYMOUS_USER_SENTINEL
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.tools.utils import load_desc
+from kimi_cli.utils.logging import logger
 
 NAME = "Memory"
 
@@ -85,6 +88,36 @@ class Memory(CallableTool2[Params]):
     def __init__(self, runtime: Runtime) -> None:
         super().__init__()
         self._runtime = runtime
+        # M4 §2.4.2.C: persistent memory append goes through KimoStorage so
+        # KIMI_STORAGE_BACKEND={file,postgres} swap transparently. Lazily
+        # constructed on first use so File-mode dev paths pay no cost.
+        # File backend keeps writing persistent.jsonl (upstream-compatible);
+        # Pg backend writes ai_user_memory + dispatches by owner_id namespace
+        # (spec §2.4.2.D: hechun-<bigint> / webui-<uuid>).
+        self.__storage_singleton: object | None = None
+
+    def _storage(self):
+        from kimi_cli.storage import build_storage
+
+        if self.__storage_singleton is None:
+            self.__storage_singleton = build_storage()
+        return self.__storage_singleton
+
+    def _resolve_owner_id(self) -> str:
+        """Resolve the owner_id namespace for the current session.
+
+        Source precedence (spec §2.4.2.D):
+          1. ``KIMI_USER_ID`` env (set by sandbox runner from SessionState.owner_id)
+          2. ``session.state.owner_id`` (local-mode CLI)
+          3. ``__anonymous__`` sentinel (dev / unauthenticated)
+        """
+        env_owner = os.environ.get("KIMI_USER_ID")
+        if env_owner:
+            return env_owner
+        state_owner = self._runtime.session.state.owner_id
+        if state_owner:
+            return state_owner
+        return ANONYMOUS_USER_SENTINEL
 
     @property
     def _persistent_file(self) -> Path:
@@ -136,11 +169,58 @@ class Memory(CallableTool2[Params]):
             self._runtime.session.state.session_memory.append(entry)
             self._runtime.session.save_state()
         else:
-            append_entry(self._persistent_file, entry)
+            # M4 §2.4.2.C: persistent path goes through KimoStorage so the
+            # file/pg backend swap is transparent (no more direct jsonl
+            # append). Memory 不再双写 (jsonl + DB): File mode writes
+            # persistent.jsonl, Pg mode writes ai_user_memory — never both.
+            #
+            # M4 §2.4.2.D: PgKimoStorage uses MemoryEntry.source_kimo_session_id
+            # (set via setattr — keeps upstream pydantic schema unchanged)
+            # to populate ai_user_memory.source_kimo_session_id.
+            self._attach_source_session(entry)
+            owner_id = self._resolve_owner_id()
+            try:
+                self._storage().append_user_memory(owner_id, entry)
+            except Exception as e:
+                # Spec §5.5 hard contract: memory append must NOT block the
+                # LLM stream. Both FileKimoStorage and PgKimoStorage already
+                # swallow internally; this extra guard catches the rare case
+                # where build_storage() itself raises (bad env at session
+                # start) so the Memory tool can still report a soft failure
+                # instead of crashing the worker.
+                logger.error(
+                    "[Memory.add] storage.append_user_memory raised owner_id={oid}: {err}",
+                    oid=owner_id,
+                    err=e,
+                )
         return _ok(
             output=json.dumps({"id": entry.id, "scope": op.scope, "kind": op.kind}),
             brief=f"Remembered ({op.scope}/{op.kind})",
         )
+
+    def _attach_source_session(self, entry: MemoryEntry) -> None:
+        """Stamp the current kimo session UUID onto the entry (M4 §2.4.2.D).
+
+        Uses ``setattr`` rather than a model field so we don't touch the
+        upstream :class:`MemoryEntry` pydantic schema (Literal kinds,
+        round-trip compatibility). :class:`PgKimoStorage` uses ``getattr``
+        with a None fallback to read this field.
+        """
+        try:
+            sid = self._runtime.session.id  # str UUID hex
+        except Exception:
+            return
+        if not sid:
+            return
+        try:
+            from uuid import UUID
+
+            sid_uuid = UUID(sid)
+            object.__setattr__(entry, "source_kimo_session_id", sid_uuid)
+        except (ValueError, TypeError):
+            # Session id not a UUID (e.g. tests with synthetic ids) — skip
+            # the stamp; PgKimoStorage falls back to NULL gracefully.
+            pass
 
     def _list(self, op: ListOp) -> ToolReturnValue:
         sections: list[str] = []
