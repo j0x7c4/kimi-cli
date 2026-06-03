@@ -127,3 +127,38 @@ def test_build_docker_cmd_forwards_hechun_env_vars(
     assert "INTERNAL_API_TOKEN=secret-token-xyz" in cmd
     assert "HECHUN_MCP_URL=http://backend:8081/mcp" in cmd
     assert "HECHUN_MCP_TOKEN=mcp-jwt-xyz" in cmd
+
+
+def test_sandbox_env_vars_includes_kimo_storage_backend_vars() -> None:
+    """M4 §2.4.2.J: storage backend 切换 env 必须在 _SANDBOX_ENV_VARS 列表里。
+
+    缺任一项都会导致 sandbox 内 PgKimoStorage 拿不到 KIMO_DB_URL，
+    archivist 写 ai_user_memory 静默回落到 file 模式。
+    """
+    assert "KIMI_STORAGE_BACKEND" in container_mod._SANDBOX_ENV_VARS
+    assert "KIMO_DB_URL" in container_mod._SANDBOX_ENV_VARS
+    assert "KIMO_DB_POOL_SIZE" in container_mod._SANDBOX_ENV_VARS
+
+
+def test_build_docker_cmd_forwards_kimo_storage_env_vars(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """End-to-end: KIMI_STORAGE_BACKEND/KIMO_DB_URL/POOL_SIZE 到 docker run -e 里。"""
+    sid = uuid4()
+    monkeypatch.setenv("KIMI_SHARE_DIR", str(tmp_path))
+    monkeypatch.setenv("KIMI_STORAGE_BACKEND", "postgres")
+    monkeypatch.setenv(
+        "KIMO_DB_URL",
+        "postgresql+psycopg2://kimo:pwd@postgres:5432/hechun",
+    )
+    monkeypatch.setenv("KIMO_DB_POOL_SIZE", "10")
+
+    proc = container_mod.ContainerSessionProcess(sid)
+    cmd = proc._build_docker_cmd()
+
+    assert "KIMI_STORAGE_BACKEND=postgres" in cmd
+    assert (
+        "KIMO_DB_URL=postgresql+psycopg2://kimo:pwd@postgres:5432/hechun" in cmd
+    )
+    assert "KIMO_DB_POOL_SIZE=10" in cmd

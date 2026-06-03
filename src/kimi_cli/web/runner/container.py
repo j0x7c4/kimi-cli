@@ -92,6 +92,14 @@ _SANDBOX_ENV_VARS = [
     "KIMI_SHARE_DIR",
     "KIMI_SESSIONS_DIR",
     "KIMI_WORK_DIR",
+    # M4 §2.4.2.J: storage backend 切换 env 必须 forward 到 sandbox 容器，
+    # 否则 sandbox 内 PgKimoStorage 拿不到 KIMO_DB_URL 无法工作
+    # （gateway 切 KIMI_STORAGE_BACKEND=postgres 后，sandbox 仍按 file 跑会
+    # 导致 archivist 写 ai_user_memory 不生效）。dev 默认 file 模式三个 var
+    # 留空 / "file" 也无副作用。
+    "KIMI_STORAGE_BACKEND",
+    "KIMO_DB_URL",
+    "KIMO_DB_POOL_SIZE",
     # Feature flags
     "ENABLE_BROWSER",
     "ENABLE_JUPYTER",
