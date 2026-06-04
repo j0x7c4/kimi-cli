@@ -25,11 +25,39 @@ from kimi_cli.web.runner.process import KimiCLIRunner, SessionProcess
 
 
 def _read_owner_id_from_disk(session_id: UUID) -> str | None:
-    """Locate the session's ``state.json`` and return its ``owner_id`` field.
+    """Resolve the session's ``owner_id``, preferring the active storage backend.
 
-    Sessions live under ``$KIMI_SHARE_DIR/sessions/<work_dir_hash>/<session_id>/``;
-    the work-dir hash is unknown to the runner, so we glob across hashes.
+    Lookup order (M4 §2.4.2.C/J):
+      1. Active ``KimoStorage`` (PgKimoStorage when ``KIMI_STORAGE_BACKEND=postgres``,
+         else FileKimoStorage) — single source of truth for session state under
+         postgres backend; ``state.json`` on disk is **stale** because
+         ``sessions.py:create_session`` writes ``owner_id`` only through
+         ``save_session_state_via_storage`` after the priority-resolution block.
+      2. Disk fallback: glob ``state.json`` under ``$KIMI_SHARE_DIR/sessions/*/<sid>/``
+         for backward-compat with file mode / older test harnesses that didn't
+         wire ``kimo_storage`` into app state.
+
+    Function name kept (``_from_disk``) to avoid churning the call site signature;
+    behavior is now "from storage preferred, disk fallback".
     """
+    # 1. Storage abstraction (Pg in postgres mode, File in file mode)
+    try:
+        from kimi_cli.storage import build_storage  # local import to avoid cycle
+
+        storage = build_storage()
+        state = storage.load_session_state(session_id)
+        if state is not None and state.owner_id:
+            return state.owner_id
+    except Exception as e:  # noqa: BLE001
+        # Storage init failure must not block sandbox spawn — fall through to
+        # disk lookup so the worst case is anonymous fallback, not a hard crash.
+        logger.warning(
+            "[container] storage lookup failed sid={sid} err={err}; falling back to disk",
+            sid=session_id,
+            err=e,
+        )
+
+    # 2. Disk fallback (file mode / pre-storage sessions)
     share = os.environ.get("KIMI_SHARE_DIR")
     if not share:
         return None
