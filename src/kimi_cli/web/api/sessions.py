@@ -414,7 +414,13 @@ async def create_session(
     else:
         resolved_owner_id = None
 
-    if resolved_owner_id is not None:
+    # hechun fork: KIMO_DEFAULT_YOLO=true 让通过 web/API 创建的 session 默认
+    # 进 yolo 模式（auto-approve 所有 approval prompts）。原因：iOS 简化 UI
+    # 没有 approval prompt 处理路径，Memory.add(persistent) 等需要 approval 的
+    # 工具调用会无限挂起。env 默认 false 保留 upstream 行为不变。
+    _default_yolo = os.environ.get("KIMO_DEFAULT_YOLO", "").lower() in {"1", "true", "yes"}
+
+    if resolved_owner_id is not None or _default_yolo:
         # Persist via the active KimoStorage backend (file or pg). Falls back
         # to direct Path helpers if the app didn't wire kimo_storage (older
         # test harnesses) so we keep upstream tests green.
@@ -425,7 +431,10 @@ async def create_session(
         )
 
         _state = load_session_state(kimi_cli_session.dir)
-        _state.owner_id = resolved_owner_id
+        if resolved_owner_id is not None:
+            _state.owner_id = resolved_owner_id
+        if _default_yolo:
+            _state.approval.yolo = True
         storage = getattr(http_request.app.state, "kimo_storage", None)
         if storage is not None:
             save_session_state_via_storage(
