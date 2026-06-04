@@ -54,7 +54,12 @@ class CrossSessionMemoryInjectionProvider(DynamicInjectionProvider):
         self._injected = True
         try:
             user_memory_dir = soul.runtime.user_memory_dir
-            persistent = read_entries(user_memory_dir / _PERSISTENT_FILENAME)
+            # M4 §2.4.2.C/D: under postgres backend, persistent entries live in
+            # ai_user_memory (PG table), NOT persistent.jsonl. file path read
+            # would return empty / stale → LLM has no recall of past sessions.
+            # Read via storage abstraction; file path stays as fallback for
+            # file-mode + upstream test harnesses.
+            persistent = _read_persistent(user_memory_dir)
             recent = read_recent_summaries(
                 user_memory_dir / RECENT_FILENAME,
                 limit=_RECENT_INJECTION_LIMIT,
@@ -69,6 +74,42 @@ class CrossSessionMemoryInjectionProvider(DynamicInjectionProvider):
 
         self._cached = [DynamicInjection(type=_INJECTION_TYPE, content=rendered)]
         return self._cached
+
+
+def _read_persistent(user_memory_dir) -> Sequence[MemoryEntry]:
+    """Read persistent memory entries — storage-aware (M4 §2.4.2.C/D).
+
+    Lookup order:
+      1. Active ``KimoStorage.list_user_memory(owner_id)`` when
+         ``KIMI_STORAGE_BACKEND=postgres``; owner_id derived from path:
+         user_memory_dir layout is ``{share}/users/{owner_id}/memory/`` so
+         the second-to-last component is the owner_id namespace
+         (``hechun-<bigint>`` / ``webui-<uuid>`` / ``__anonymous__``).
+      2. File fallback ``persistent.jsonl`` (file mode + upstream).
+    """
+    import os as _os
+
+    if _os.environ.get("KIMI_STORAGE_BACKEND", "file").lower() == "postgres":
+        try:
+            owner_id = user_memory_dir.parent.name  # users/<owner_id>/memory
+        except Exception:
+            owner_id = None
+        if owner_id:
+            try:
+                from kimi_cli.storage import build_storage
+
+                entries = build_storage().list_user_memory(owner_id)
+                if entries:
+                    return entries
+            except Exception as _e:  # noqa: BLE001
+                logger.warning(
+                    "[cross_session_memory] storage probe failed owner_id={oid} "
+                    "err={err}; falling back to file",
+                    oid=owner_id,
+                    err=_e,
+                )
+
+    return read_entries(user_memory_dir / _PERSISTENT_FILENAME)
 
 
 def _render(
