@@ -107,6 +107,39 @@ def _migrate_legacy_metadata(session_dir: Path, state: SessionState) -> str:
 
 
 def load_session_state(session_dir: Path) -> SessionState:
+    # M4 §2.4.2.C / J: under postgres backend, the file ``state.json`` is **stale**
+    # (sessions.py:create_session writes owner_id / approval.yolo via storage only,
+    # not back to disk). All callers — including KimiSession.__init__ inside the
+    # sandbox — must see the PG row as source of truth, otherwise approval.yolo /
+    # owner_id stays False / None and Memory.add(persistent) blocks on approval
+    # forever (踩过 2026-06-04，see feedback_kimo_owner_id_disk_stale_under_pg_backend).
+    #
+    # Strategy: when storage backend is "postgres", probe storage first using the
+    # UUID embedded in ``session_dir.name``. Storage miss / parse error → fall back
+    # to file path so file-mode + older callsites keep working bit-for-bit.
+    import os as _os
+
+    if _os.environ.get("KIMI_STORAGE_BACKEND", "file").lower() == "postgres":
+        try:
+            kimo_session_id = UUID(session_dir.name)
+        except (ValueError, AttributeError):
+            kimo_session_id = None
+        if kimo_session_id is not None:
+            try:
+                from kimi_cli.storage import build_storage
+
+                _storage = build_storage()
+                _state = _storage.load_session_state(kimo_session_id)
+                if _state is not None:
+                    return _state
+            except Exception as _e:  # noqa: BLE001
+                logger.warning(
+                    "[load_session_state] storage probe failed sid={sid} err={err}; "
+                    "falling back to file",
+                    sid=kimo_session_id,
+                    err=_e,
+                )
+
     state_file = session_dir / STATE_FILE_NAME
     if not state_file.exists():
         state = SessionState()
