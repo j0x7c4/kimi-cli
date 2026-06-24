@@ -192,9 +192,56 @@ def create_app(
             cls=type(app.state.kimo_storage).__name__,
         )
 
-        # Start KimiCLI runner (containerized or local)
+        # hechun-fork-cci: select sandbox spawner by KIMI_SPAWNER_BACKEND (spec
+        # §C-9). 'docker' (default) keeps the existing ContainerRunner path and
+        # returns None — purely additive. 'cci' builds CCISpawner from
+        # HUAWEICLOUD_* env. WarmPoolManager / select_spawner gray-routing (06-09
+        # plan) plug into app.state.spawner when present.
+        from kimi_cli.web.spawner import build_spawner
+
+        try:
+            app.state.spawner = build_spawner()
+        except Exception as _e:  # noqa: BLE001
+            # A misconfigured CCI spawner must surface loudly but not before the
+            # storage init result; re-raise to fail fast (no silent docker fallback
+            # when cci was explicitly requested).
+            logger.error("[create_app] spawner init failed: {err}", err=_e)
+            raise
+        _spawner_backend = (os.environ.get("KIMI_SPAWNER_BACKEND") or "docker").strip().lower()
+        logger.info("[create_app] spawner backend={b}", b=_spawner_backend)
+
+        # hechun-fork-cci: mount /metrics (spec §7.2). Wire the CCI client into
+        # the metrics state so the IP-pool gauge can poll read_network.
+        app.state.metrics = None
+        if _load_env_flag("KIMI_METRICS_ENABLED"):
+            try:
+                from kimi_cli.web.metrics import MetricsState
+
+                metrics_state = MetricsState()
+                spawner = getattr(app.state, "spawner", None)
+                if spawner is not None and hasattr(spawner, "client"):
+                    metrics_state.cci_client = spawner.client
+                    metrics_state.namespace = getattr(
+                        spawner, "namespace", metrics_state.namespace
+                    )
+                app.state.metrics = metrics_state
+                logger.info("[create_app] metrics on (/metrics mounted)")
+            except Exception as _e:  # noqa: BLE001
+                logger.warning("[create_app] metrics init failed: {err}", err=_e)
+
+        # Start KimiCLI runner. Selection order (hechun-fork-cci):
+        #   1. spawner is CCI (KIMI_SPAWNER_BACKEND=cci) → CCIRunner: worker runs
+        #      in a CCI Pod, driven over the exec WebSocket (same read loop /
+        #      send path as docker via SessionProcess transport primitives).
+        #   2. KIMI_USE_CONTAINERS → ContainerRunner (docker run -i --rm).
+        #   3. else → KimiCLIRunner (local subprocess).
         use_containers = _load_env_flag("KIMI_USE_CONTAINERS")
-        if use_containers and ContainerRunner is not None:
+        if _spawner_backend == "cci" and app.state.spawner is not None:
+            from kimi_cli.web.runner.cci_process import CCIRunner
+
+            runner = CCIRunner(spawner=app.state.spawner)
+            logger.info("[create_app] runner=CCIRunner (exec WebSocket)")
+        elif use_containers and ContainerRunner is not None:
             runner = ContainerRunner(
                 image=os.environ.get("SANDBOX_IMAGE", "kimi-agent-sandbox:latest"),
                 network=os.environ.get("DOCKER_NETWORK"),
@@ -262,6 +309,18 @@ def create_app(
     application.include_router(capabilities_router)
     if not restrict_sensitive_apis:
         application.include_router(open_in_router)
+
+    # hechun-fork-cci: /metrics router (spec §7.2). Registered at build time; the
+    # handler returns 503 until lifespan sets app.state.metrics (i.e. only emits
+    # when KIMI_METRICS_ENABLED). prometheus_client is imported lazily inside the
+    # handler so the docker path doesn't require it.
+    if _load_env_flag("KIMI_METRICS_ENABLED"):
+        try:
+            from kimi_cli.web.metrics import build_metrics_router
+
+            application.include_router(build_metrics_router())
+        except Exception as _e:  # noqa: BLE001
+            logger.warning("Failed to mount /metrics router: {err}", err=_e)
 
     @application.get("/scalar", include_in_schema=False)
     @application.get("/docs", include_in_schema=False)

@@ -298,22 +298,64 @@ class SessionProcess:
             )
         )
 
-    async def _read_loop(self) -> None:
-        """Read messages from subprocess stdout and broadcast to WebSockets."""
+    # ── byte-level transport primitives (overridable per backend) ────────────
+    #
+    # hechun-fork-cci: the JSON-RPC read loop + stdin framing below are backend
+    # agnostic. The only backend-specific bits are these five primitives, which
+    # the base class implements against ``self._process`` (asyncio subprocess —
+    # also covers docker, whose ``docker run -i`` stdio IS the subprocess stdio).
+    # ``CCISessionProcess`` (runner/cci_process.py) overrides them to drive a
+    # ``KimoExecStream`` (channel.k8s.io exec WebSocket) instead, so docker and
+    # CCI converge on one read loop / send path.
+
+    async def _transport_read_stdout_line(self) -> bytes:
+        """Read one newline-terminated JSON-RPC frame from the worker stdout."""
         assert self._process is not None
         assert self._process.stdout is not None
-        assert self._process.stderr is not None
+        return await self._process.stdout.readline()
 
+    def _transport_stdout_at_eof(self) -> bool:
+        """Whether the worker stdout has reached EOF (worker exited)."""
+        assert self._process is not None
+        assert self._process.stdout is not None
+        return self._process.stdout.at_eof()
+
+    async def _transport_read_stderr(self) -> bytes:
+        """Drain the worker stderr (diagnostic on unexpected exit)."""
+        assert self._process is not None
+        assert self._process.stderr is not None
+        return await self._process.stderr.read()
+
+    def _transport_returncode(self) -> int | None:
+        """Worker exit code, or None if still running / unknown."""
+        return self._process.returncode if self._process is not None else None
+
+    async def _transport_write_stdin(self, data: bytes) -> None:
+        """Write a framed JSON-RPC message to the worker stdin and flush."""
+        process = self._process
+        assert process is not None
+        assert process.stdin is not None
+        process.stdin.write(data)
+        await process.stdin.drain()
+
+    async def _read_loop(self) -> None:
+        """Read messages from worker stdout and broadcast to WebSockets.
+
+        Backend-agnostic: reads via :meth:`_transport_read_stdout_line` etc., so
+        the subprocess/docker path and the CCI exec-WebSocket path share this
+        exact loop (hechun-fork-cci).
+        """
         try:
             while True:
-                line = await self._process.stdout.readline()
+                line = await self._transport_read_stdout_line()
                 if not line:
-                    if self._process.stdout.at_eof():
+                    if self._transport_stdout_at_eof():
                         if self._expecting_exit:
                             break
-                        stderr = await self._process.stderr.read()
+                        stderr = await self._transport_read_stderr()
                         if not stderr:
                             stderr = b"No stderr"
+                        returncode = self._transport_returncode()
                         # Clear in-flight IDs before broadcasting so that
                         # is_busy is already False when the frontend reacts
                         # to the error and sends a new prompt.
@@ -322,13 +364,13 @@ class SessionProcess:
                             JSONRPCErrorResponse(
                                 id=str(uuid4()),
                                 error=JSONRPCErrorObject(
-                                    code=self._process.returncode or -1,
+                                    code=returncode or -1,
                                     message=stderr.decode("utf-8"),
                                 ),
                             ).model_dump_json()
                         )
                         logger.warning(
-                            f"Process exited with {self._process.returncode}: "
+                            f"Process exited with {returncode}: "
                             f"{stderr.decode('utf-8')}"
                         )
                         await self._emit_status(
@@ -655,11 +697,8 @@ class SessionProcess:
             self._replay_buffers.pop(ws, None)
 
     async def send_message(self, message: str) -> None:
-        """Send a message to the subprocess stdin."""
+        """Send a message to the worker stdin (subprocess or CCI exec stdin)."""
         await self.start()
-        process = self._process
-        assert process is not None
-        assert process.stdin is not None
 
         # Handle in message
         try:
@@ -683,8 +722,7 @@ class SessionProcess:
             logger.error(f"{e.__class__.__name__} {e}: Invalid JSONRPC in message: {message}")
             return
 
-        process.stdin.write((message + "\n").encode("utf-8"))
-        await process.stdin.drain()
+        await self._transport_write_stdin((message + "\n").encode("utf-8"))
 
 
 class KimiCLIRunner:
