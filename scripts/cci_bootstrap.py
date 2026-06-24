@@ -65,7 +65,7 @@ def build_network(
         "kind": "Network",
         "metadata": metadata,
         "spec": {
-            "networkType": "underlay-neutron",
+            "networkType": "underlay_neutron",
             "subnets": [{"subnetID": subnet_id}],
             "securityGroups": [sg_id],
             "ipFamilies": ["IPv4"],
@@ -84,6 +84,12 @@ async def _ensure(coro, what: str) -> None:
     except CciApiError as e:
         if e.status == 409:
             print(f"[cci_bootstrap] {what} already exists (409), ok")
+            return
+        # CCI 2.0 控制台建 namespace 时会自动建 <ns>-default-network 绑默认子网；
+        # 再建绑同子网的 network 被 webhook 拒为 "subnetID ... not allowed to be
+        # duplicated" → 视为已存在（M0 live 实测）。
+        if e.status == 403 and "duplicat" in str(e).lower():
+            print(f"[cci_bootstrap] {what}: subnet 已被现有 network 绑定 (403 duplicate)，ok")
             return
         raise
 
