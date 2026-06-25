@@ -153,6 +153,28 @@ class MetricsState:
             value = _IP_STATUS_FAILED
         self.metrics["cci_network_ip_status"].set(value)
 
+    async def refresh_active_sandboxes(self) -> None:
+        """Set ``kimo_active_sandboxes`` from the REAL Pod count (drift-immune).
+
+        The inc/dec call-site bookkeeping (spawn +1 / stop -1) drifts whenever a
+        Pod vanishes outside the gateway's stop path — out-of-band delete, Pod
+        self-death, or gateway restart (in-memory gauge survives but Pods don't).
+        Polling the actual ``kimo-sandbox-*`` Pod count on every scrape keeps the
+        gauge truthful regardless. None-safe; never crashes the scrape.
+        """
+        if self.cci_client is None:
+            return
+        try:
+            pods = await self.cci_client.list_pods(self.namespace)
+            count = sum(
+                1
+                for p in pods
+                if str(p.get("metadata", {}).get("name", "")).startswith("kimo-sandbox-")
+            )
+            self.metrics["active_sandboxes"].set(count)
+        except Exception:  # noqa: BLE001 — metrics must never crash the gateway
+            pass
+
     # ── runtime instrumentation helpers (spec §7.2) ─────────────────────────────
     # Call-site sugar so the CCI spawn / stop / api-error paths can emit metrics
     # without touching prometheus_client handles directly. Every helper swallows
@@ -235,6 +257,7 @@ def build_metrics_router() -> APIRouter:
         if state is None:
             return PlainTextResponse("# metrics not initialized\n", status_code=503)
         await state.refresh_ip_status()
+        await state.refresh_active_sandboxes()
         data = generate_latest(state.registry)
         return Response(content=data, media_type=CONTENT_TYPE_LATEST)
 

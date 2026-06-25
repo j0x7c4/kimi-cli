@@ -107,6 +107,21 @@ class SessionProcess:
         self._lock = asyncio.Lock()
         self._ws_lock = asyncio.Lock()
         self._sent_files: set[str] = set()
+        # hechun-fork-cci: monotonic timestamp of the last activity on this session
+        # (worker start / prompt sent / busy transition). The CCI idle sweeper
+        # (web/app.py) reclaims sessions whose worker is alive but idle past
+        # KIMI_CCI_IDLE_TTL_SECONDS. Harmless on docker/local (just a timestamp,
+        # never read there). None until the first activity.
+        self._last_active_at: float | None = None
+
+    @property
+    def last_active_at(self) -> float | None:
+        """time.monotonic() of the last activity, or None if never active."""
+        return self._last_active_at
+
+    def _touch_active(self) -> None:
+        """Mark this session as active *now* (monotonic clock)."""
+        self._last_active_at = time.monotonic()
 
     @property
     def is_alive(self) -> bool:
@@ -178,6 +193,10 @@ class SessionProcess:
         detail: str | None = None,
     ) -> None:
         """Emit a status update if different from current."""
+        # hechun-fork-cci: a busy transition is activity (prompt in flight) — bump
+        # the idle clock so the CCI sweeper never reclaims a working session.
+        if state == "busy":
+            self._touch_active()
         status = self._build_status(state, reason, detail)
         if status is None:
             return
@@ -200,6 +219,7 @@ class SessionProcess:
             self._in_flight_prompt_ids.clear()
             self._expecting_exit = False
             self._worker_id = str(uuid4())
+            self._touch_active()
 
             # 16MB buffer for large messages (e.g., base64-encoded images)
             STREAM_LIMIT = 16 * 1024 * 1024
@@ -715,6 +735,9 @@ class SessionProcess:
 
     async def send_message(self, message: str) -> None:
         """Send a message to the worker stdin (subprocess or CCI exec stdin)."""
+        # hechun-fork-cci: any inbound message is activity — keep the idle sweeper
+        # from reclaiming a session the user is actively driving.
+        self._touch_active()
         await self.start()
 
         # Handle in message
@@ -777,6 +800,15 @@ class KimiCLIRunner:
     def get_session(self, session_id: UUID) -> SessionProcess | None:
         """Get a session process if it exists."""
         return self._sessions.get(session_id)
+
+    def iter_sessions(self) -> list[tuple[UUID, SessionProcess]]:
+        """Snapshot of (session_id, process) pairs currently tracked.
+
+        hechun-fork-cci: enumeration entry point for the CCI idle sweeper
+        (web/app.py). Returns a list copy so callers can iterate without holding
+        the runner lock or racing concurrent get_or_create_session mutations.
+        """
+        return list(self._sessions.items())
 
     async def detach_websocket(self, ws: WebSocket, session_id: UUID) -> None:
         """Detach a WebSocket from a session."""

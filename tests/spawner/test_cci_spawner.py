@@ -313,6 +313,121 @@ class TestSpawnMetrics:
         await sp.stop(handle)  # no raise
 
 
+class TestSpawnOrphanSelfHeal:
+    """A. spawn 撞名自愈: create_pod 遇 409 → 删旧 Pod → 等其消失 → 重建一次。"""
+
+    async def test_409_deletes_old_then_recreates(self):
+        client = _FakeClient()
+        # First create_pod → 409 (orphan name clash); second → success.
+        create_calls = {"n": 0}
+        orig_create = client.create_pod
+
+        async def create_409_then_ok(ns, pod):
+            create_calls["n"] += 1
+            if create_calls["n"] == 1:
+                raise CciApiError("create_pod", 409, "AlreadyExists", "exists")
+            return await orig_create(ns, pod)
+
+        client.create_pod = create_409_then_ok  # type: ignore[assignment]
+        # read_pod: first call (wait_pod_gone) → 404 gone; then the Running poll.
+        client.read_raises = None
+        reads = {"n": 0}
+
+        async def read_seq(ns, name):
+            reads["n"] += 1
+            if reads["n"] == 1:
+                # _wait_pod_gone polls read_pod → 404 = gone.
+                raise CciApiError("read_pod", 404, "NotFound", "gone")
+            return {"status": {"phase": "Running", "podIP": "10.0.0.7"}}
+
+        client.read_pod = read_seq  # type: ignore[assignment]
+        sp = _make_spawner(client)
+        sid = uuid4()
+        handle = await sp.spawn(sid, "hechun-1", {})
+
+        assert create_calls["n"] == 2  # created twice (after delete)
+        assert handle.network_endpoint == "ws://10.0.0.7:5494"
+        # old orphan Pod was deleted with grace=0.
+        assert client.deleted
+        assert client.deleted[0] == ("hechun-prod", f"kimo-sandbox-{sid}", 0)
+
+    async def test_non_409_create_error_propagates(self):
+        client = _FakeClient()
+
+        async def create_500(ns, pod):
+            raise CciApiError("create_pod", 500, "InternalError", "boom")
+
+        client.create_pod = create_500  # type: ignore[assignment]
+        sp = _make_spawner(client)
+        with pytest.raises(CciApiError) as ei:
+            await sp.spawn(uuid4(), "hechun-1", {})
+        assert ei.value.status == 500
+        # No delete attempted for a non-409 failure.
+        assert client.deleted == []
+
+
+class TestReconcileOrphans:
+    """B. 启动孤儿清扫: 只删 kimo-sandbox-* 前缀，不碰 cci-imagesnapshot-*/其它。"""
+
+    def _client_with_pods(self, names: list[str]) -> _FakeClient:
+        client = _FakeClient()
+
+        async def list_pods(ns, label_selector=None):
+            return [{"metadata": {"name": n}} for n in names]
+
+        client.list_pods = list_pods  # type: ignore[attr-defined]
+        return client
+
+    async def test_only_deletes_sandbox_prefix(self):
+        client = self._client_with_pods(
+            [
+                "kimo-sandbox-aaa",
+                "kimo-sandbox-bbb",
+                "cci-imagesnapshot-xyz",  # CCI 托管快照 Pod — 绝不删
+                "some-other-workload",  # 别的工作负载 — 绝不删
+            ]
+        )
+        sp = _make_spawner(client)
+        n = await sp.reconcile_orphans()
+        assert n == 2
+        deleted_names = {d[1] for d in client.deleted}
+        assert deleted_names == {"kimo-sandbox-aaa", "kimo-sandbox-bbb"}
+        # grace=0 on every delete.
+        assert all(d[2] == 0 for d in client.deleted)
+
+    async def test_no_sandbox_pods_deletes_nothing(self):
+        client = self._client_with_pods(["cci-imagesnapshot-1", "redis-0"])
+        sp = _make_spawner(client)
+        assert await sp.reconcile_orphans() == 0
+        assert client.deleted == []
+
+    async def test_per_delete_failure_is_best_effort(self):
+        client = self._client_with_pods(["kimo-sandbox-a", "kimo-sandbox-b"])
+
+        async def delete_first_500(ns, name, grace=10):
+            if name == "kimo-sandbox-a":
+                raise CciApiError("delete_pod", 500, "Err", "boom")
+            client.deleted.append((ns, name, grace))
+
+        client.delete_pod = delete_first_500  # type: ignore[assignment]
+        sp = _make_spawner(client)
+        # One failure logged + skipped; the other still deleted; no raise.
+        n = await sp.reconcile_orphans()
+        assert n == 1
+        assert client.deleted == [("hechun-prod", "kimo-sandbox-b", 0)]
+
+    async def test_list_pods_failure_returns_zero(self):
+        client = _FakeClient()
+
+        async def list_boom(ns, label_selector=None):
+            raise RuntimeError("network down")
+
+        client.list_pods = list_boom  # type: ignore[assignment]
+        sp = _make_spawner(client)
+        # Best-effort: list failure → 0, no raise.
+        assert await sp.reconcile_orphans() == 0
+
+
 class TestFromEnv:
     def test_from_env_requires_keys(self, monkeypatch: pytest.MonkeyPatch):
         for k in ("HUAWEICLOUD_AK", "HUAWEICLOUD_SK", "HUAWEICLOUD_CCI_REGION"):

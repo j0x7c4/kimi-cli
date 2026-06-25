@@ -74,6 +74,36 @@ class TestMetricSet:
         text = generate_latest(state.registry).decode("utf-8")
         assert "kimo_cci_network_ip_status 1.0" in text
 
+    async def test_refresh_active_sandboxes_counts_real_pods(self):
+        state = MetricsState()
+
+        class _Client:
+            async def list_pods(self, ns, **kw):
+                # 2 sandbox Pods + 1 imagesnapshot Pod + 1 unrelated → count == 2
+                return [
+                    {"metadata": {"name": "kimo-sandbox-aaa"}},
+                    {"metadata": {"name": "kimo-sandbox-bbb"}},
+                    {"metadata": {"name": "cci-imagesnapshot-xyz"}},
+                    {"metadata": {"name": "some-other-pod"}},
+                ]
+
+        state.cci_client = _Client()  # type: ignore[assignment]
+        await state.refresh_active_sandboxes()
+        from prometheus_client import generate_latest
+
+        text = generate_latest(state.registry).decode("utf-8")
+        assert "kimo_active_sandboxes 2.0" in text
+
+    async def test_refresh_active_sandboxes_safe_on_error(self):
+        state = MetricsState()
+
+        class _Client:
+            async def list_pods(self, ns, **kw):
+                raise RuntimeError("cci unreachable")
+
+        state.cci_client = _Client()  # type: ignore[assignment]
+        await state.refresh_active_sandboxes()  # must not raise
+
     async def test_refresh_ip_status_marks_failed_on_error(self):
         state = MetricsState()
 

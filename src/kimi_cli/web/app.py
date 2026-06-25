@@ -4,9 +4,10 @@ import asyncio
 import os
 import secrets
 import sys
+import time
 import webbrowser
 from collections.abc import Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import quote
@@ -124,7 +125,109 @@ def _load_env_flag(key: str) -> bool:
     return os.environ.get(key, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _bool_env(key: str, *, default: bool) -> bool:
+    """Read a boolean env var with an explicit default (None-safe).
+
+    Unlike :func:`_load_env_flag` (which defaults to False), this honours a
+    caller-supplied default so a flag can default to *on* and be turned off only
+    by an explicit falsy value.
+    """
+    raw = os.environ.get(key)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int_env(key: str, *, default: int) -> int:
+    """Read a positive-int env var, falling back to ``default`` on bad input."""
+    raw = os.environ.get(key)
+    if raw is None or not raw.strip().isdigit():
+        return default
+    val = int(raw.strip())
+    return val if val > 0 else default
+
+
 ENV_LAN_ONLY = "KIMI_WEB_LAN_ONLY"
+
+# hechun-fork-cci: gateway-side CCI Pod 生命周期兜底 env（仅 CCI 模式生效）。
+_ENV_RECONCILE_ON_STARTUP = "KIMI_CCI_RECONCILE_ON_STARTUP"  # 默认开（单实例假设）
+_ENV_SWEEP_INTERVAL = "KIMI_CCI_SWEEP_INTERVAL_SECONDS"  # 默认 60s
+_ENV_IDLE_TTL = "KIMI_CCI_IDLE_TTL_SECONDS"  # 默认 900s = 15min
+
+
+async def _reclaim_idle_cci_sessions(runner: Any, *, idle_ttl_s: int) -> int:
+    """One sweep pass: stop_worker() every CCI session idle past ``idle_ttl_s``.
+
+    hechun-fork-cci. A session is reclaimed iff ALL hold:
+      • it is CCI-backed (has a ``handle`` attribute → CCISessionProcess);
+      • its worker is alive AND there is currently a sandbox handle (a spawn that
+        already completed — never mid-spawn, where handle is still None);
+      • status.state is ``idle`` (NOT busy, NOT restarting, NOT stopped/error);
+      • ``now - last_active_at > idle_ttl_s``.
+
+    Under CCI ``stop_worker`` deletes the Pod (billing stops). Returns the number
+    of sessions reclaimed. Never raises — per-session failures are logged + skipped
+    so one bad session can't abort the sweep.
+    """
+    now = time.monotonic()
+    reclaimed = 0
+    try:
+        sessions = runner.iter_sessions()
+    except Exception as e:  # noqa: BLE001 — enumeration failure must not crash sweeper
+        logger.warning("[cci-sweeper] iter_sessions failed: {err}", err=e)
+        return 0
+
+    for sid, proc in sessions:
+        try:
+            # CCI-backed only: docker/local SessionProcess has no ``handle``.
+            handle = getattr(proc, "handle", None)
+            if handle is None:
+                # Either not CCI, or CCI but not (yet) spawned / mid-spawn → skip.
+                # Skipping mid-spawn (handle still None) is the safety guarantee
+                # that we never reclaim a session while spawn is in progress.
+                continue
+            if not proc.is_alive:
+                continue
+            # Only reclaim genuinely idle sessions. busy = prompt in flight;
+            # restarting = config-reload in progress; both must be left alone.
+            if proc.status.state != "idle":
+                continue
+            last = proc.last_active_at
+            if last is None or (now - last) <= idle_ttl_s:
+                continue
+            idle_for = int(now - last)
+            logger.info(
+                "[cci-sweeper] reclaiming idle session {sid} (idle {s}s > ttl)",
+                sid=sid,
+                s=idle_for,
+            )
+            await proc.stop_worker(reason="idle_reclaim")
+            reclaimed += 1
+        except Exception as e:  # noqa: BLE001 — one bad session can't abort the sweep
+            logger.warning(
+                "[cci-sweeper] failed to reclaim session {sid}: {err}", sid=sid, err=e
+            )
+    return reclaimed
+
+
+async def _cci_idle_sweeper(runner: Any, *, interval_s: int, idle_ttl_s: int) -> None:
+    """Background loop: every ``interval_s`` reclaim idle CCI sessions.
+
+    hechun-fork-cci. Lives for the app lifespan (cancelled on shutdown). Each pass
+    is wrapped so any exception is swallowed + logged — the sweeper must never die
+    and take the gateway down with it. CancelledError propagates so lifespan can
+    cleanly tear it down.
+    """
+    while True:
+        try:
+            await asyncio.sleep(interval_s)
+            n = await _reclaim_idle_cci_sessions(runner, idle_ttl_s=idle_ttl_s)
+            if n:
+                logger.info("[cci-sweeper] reclaimed {n} idle CCI session(s)", n=n)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — never let the sweeper crash
+            logger.warning("[cci-sweeper] sweep pass errored (continuing): {err}", err=e)
 
 
 def create_app(
@@ -244,11 +347,25 @@ def create_app(
         #   2. KIMI_USE_CONTAINERS → ContainerRunner (docker run -i --rm).
         #   3. else → KimiCLIRunner (local subprocess).
         use_containers = _load_env_flag("KIMI_USE_CONTAINERS")
+        sweeper_task: asyncio.Task[None] | None = None
         if _spawner_backend == "cci" and app.state.spawner is not None:
             from kimi_cli.web.runner.cci_process import CCIRunner
 
             runner = CCIRunner(spawner=app.state.spawner)
             logger.info("[create_app] runner=CCIRunner (exec WebSocket)")
+
+            # hechun-fork-cci: gateway-side Pod 生命周期兜底（不依赖 backend 正确性）。
+            #
+            # ⚠️ 单 gateway 实例假设：启动孤儿清扫(reconcile_orphans)会删掉整个
+            # namespace 里所有 kimo-sandbox-* Pod。多副本共享同一 namespace 时，启动
+            # 清扫会误删别副本正在服务的 Pod —— 多副本部署务必设
+            # KIMI_CCI_RECONCILE_ON_STARTUP=0 关掉本清扫。
+            if _bool_env(_ENV_RECONCILE_ON_STARTUP, default=True):
+                try:
+                    n = await app.state.spawner.reconcile_orphans()
+                    logger.info("[create_app] reconcile_orphans 删除 {n} 个孤儿 Pod", n=n)
+                except Exception as _e:  # noqa: BLE001 — 清扫失败不阻塞启动
+                    logger.warning("[create_app] reconcile_orphans 失败（忽略）: {err}", err=_e)
         elif use_containers and ContainerRunner is not None:
             runner = ContainerRunner(
                 image=os.environ.get("SANDBOX_IMAGE", "kimi-agent-sandbox:latest"),
@@ -264,9 +381,28 @@ def create_app(
         app.state.runner = runner
         runner.start()
 
+        # hechun-fork-cci: idle 兜底 sweeper —— 仅 CCI 模式启。周期回收"worker 活着但
+        # 空闲超时"的 session（防 Pod 永久 Running 计费），是对 backend SandboxBroker
+        # 的 gateway 侧兜底（防其失效）。docker/local 不启。
+        if _spawner_backend == "cci" and app.state.spawner is not None:
+            interval = _int_env(_ENV_SWEEP_INTERVAL, default=60)
+            idle_ttl = _int_env(_ENV_IDLE_TTL, default=900)
+            sweeper_task = asyncio.create_task(
+                _cci_idle_sweeper(runner, interval_s=interval, idle_ttl_s=idle_ttl)
+            )
+            logger.info(
+                "[create_app] CCI idle sweeper on interval={i}s idle_ttl={t}s",
+                i=interval,
+                t=idle_ttl,
+            )
+
         try:
             yield
         finally:
+            if sweeper_task is not None:
+                sweeper_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await sweeper_task
             await runner.stop()
 
     application = FastAPI(

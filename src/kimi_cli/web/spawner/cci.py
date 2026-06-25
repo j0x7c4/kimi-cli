@@ -26,9 +26,10 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from kimi_cli import logger
 from kimi_cli.web.spawner import SandboxHandle, SpawnTimeout
 from kimi_cli.web.spawner.cci_auth import HuaweiSigner, TokenProvider
-from kimi_cli.web.spawner.cci_client import CciRestClient
+from kimi_cli.web.spawner.cci_client import CciApiError, CciRestClient
 from kimi_cli.web.spawner.cci_exec import KimoExecStream
 
 if TYPE_CHECKING:
@@ -61,6 +62,16 @@ _GRACE_S = 10
 # 镜像 CMD 是 /start-sandbox.sh（worker 读主进程 stdin），但 CCI 不喂主 stdin → worker 读 EOF
 # 即退出 → Pod Failed（2026-06-25 整链实测）。改主进程 keepalive，worker 由 gateway 经 exec 驱动。
 _KEEPALIVE_CMD = ["sleep", "infinity"]
+
+# Sandbox Pod 名前缀（spawn 用 ``kimo-sandbox-{sid}``）。启动孤儿清扫(reconcile_orphans)
+# 与撞名自愈都按此前缀识别"本网关产出的 sandbox Pod"，绝不碰 CCI 托管的
+# ``cci-imagesnapshot-*`` 快照 Pod 或 namespace 里别的工作负载。
+_SANDBOX_POD_PREFIX = "kimo-sandbox-"
+
+# 撞名自愈：删旧 Pod 后 poll read_pod 到 404（已消失）的上限秒数 + 间隔。
+# grace=0 删除后 CCI 通常几秒内 Pod 消失；30s 给足余量。
+_POD_GONE_TIMEOUT_S = 30
+_POD_GONE_POLL_S = 2
 
 
 def _label_safe(value: str, fallback: str = "x") -> str:
@@ -162,7 +173,7 @@ class CCISpawner:
         started = time.perf_counter()
         pod = self._build_pod_spec(sid, owner_id, env)
         try:
-            resp = await self.client.create_pod(self.namespace, pod)
+            resp = await self._create_pod_replacing_orphan(pod)
             name = resp.get("metadata", {}).get("name") or pod["metadata"]["name"]
             try:
                 pod_ip = await self._wait_running(name, timeout=_SPAWN_TIMEOUT_S)
@@ -170,8 +181,6 @@ class CCISpawner:
                 # 超时/取消即删 Pod：keepalive 主进程(sleep infinity)不会自退，否则泄漏成
                 # 永久 Running → 持续计费（2026-06-25 实测：超时的孤儿 Pod 一直跑）。
                 import contextlib  # noqa: PLC0415
-
-                from kimi_cli.web.spawner.cci_client import CciApiError  # noqa: PLC0415
 
                 with contextlib.suppress(CciApiError):
                     await self.client.delete_pod(self.namespace, name, grace=0)
@@ -202,6 +211,102 @@ class CCISpawner:
         """Emit kimo_sandbox_spawn_total for a non-success spawn (None-safe)."""
         if self.metrics is not None:
             self.metrics.record_spawn(backend=_BACKEND, result=result)
+
+    async def _create_pod_replacing_orphan(self, pod: dict) -> dict:
+        """create_pod，遇 **409**（Pod 名已存在=孤儿）自愈：删旧→等消失→重建一次。
+
+        撞名场景：sandbox Pod 名是确定性的 ``kimo-sandbox-{sid}``；gateway 重启会丢失
+        内存里的 session 追踪，但旧 Pod（keepalive 主进程 sleep infinity）仍 Running 永久
+        计费。用户重连同一 session → create_pod 撞名 → CCI 返回 HTTP 409。这里删掉孤儿
+        旧 Pod、等它彻底消失（避免立即重建仍撞名），再重建一次。
+
+        非 409（500/422/网络等）按原样抛出，让 spawn 的通用 except 记 failure。
+        重建仍 409（极罕见的并发竞态）也直接抛——不无限重试。
+        """
+        name = pod["metadata"]["name"]
+        try:
+            return await self.client.create_pod(self.namespace, pod)
+        except CciApiError as e:
+            if e.status != 409:
+                raise
+            logger.warning(
+                "Pod {name} 已存在（孤儿，疑似 gateway 重启残留）→ 删除重建",
+                name=name,
+            )
+            import contextlib  # noqa: PLC0415
+
+            with contextlib.suppress(CciApiError):
+                await self.client.delete_pod(self.namespace, name, grace=0)
+            await self._wait_pod_gone(name)
+            return await self.client.create_pod(self.namespace, pod)
+
+    async def _wait_pod_gone(self, name: str) -> None:
+        """Poll read_pod until it 404s (Pod gone) or _POD_GONE_TIMEOUT_S elapses.
+
+        Best-effort：超时不抛（调用方会重建，重建若仍撞名才会暴露错误）。
+        """
+        waited = 0
+        while waited < _POD_GONE_TIMEOUT_S:
+            try:
+                await self.client.read_pod(self.namespace, name)
+            except CciApiError as e:
+                if e.status == 404:
+                    return
+                # 其它读错误：不阻塞，让调用方继续尝试重建。
+                return
+            await asyncio.sleep(_POD_GONE_POLL_S)
+            waited += _POD_GONE_POLL_S
+
+    async def reconcile_orphans(self) -> int:
+        """启动时清扫本网关产出的 sandbox 孤儿 Pod，返回删除数（best-effort，不抛）。
+
+        删除 namespace 里所有 name 以 ``kimo-sandbox-`` 开头的 Pod（grace=0）。这些是
+        gateway 重启后丢失追踪、却仍 Running 永久计费的孤儿（keepalive 主进程不会自退）。
+
+        **只按名字前缀过滤**：绝不删 CCI 托管的 ``cci-imagesnapshot-*`` 镜像快照 Pod，
+        也不删 namespace 里别的工作负载。每个删除失败只 log 不抛；整体不抛（不阻塞启动）。
+
+        ⚠️ **单 gateway 实例假设**：此清扫会删掉**整个 namespace** 里所有 sandbox 前缀的
+        Pod。多副本共享同一 namespace 时，启动清扫会**误删别副本正在服务的 Pod**。
+        多副本部署务必设 ``KIMI_CCI_RECONCILE_ON_STARTUP=0`` 关掉本清扫。
+        """
+        import contextlib  # noqa: PLC0415
+
+        deleted = 0
+        try:
+            pods = await self.client.list_pods(self.namespace)
+        except Exception as e:  # noqa: BLE001 — 清扫绝不阻塞启动
+            logger.warning("reconcile_orphans: list_pods 失败，跳过清扫: {err}", err=e)
+            return 0
+        for pod in pods:
+            name = (pod.get("metadata") or {}).get("name") or ""
+            if not name.startswith(_SANDBOX_POD_PREFIX):
+                continue
+            try:
+                await self.client.delete_pod(self.namespace, name, grace=0)
+                deleted += 1
+                logger.warning(
+                    "reconcile_orphans: 删除孤儿 sandbox Pod {name}", name=name
+                )
+            except CciApiError as e:
+                if e.status == 404:
+                    # 已消失（竞态），视作已清理。
+                    continue
+                logger.warning(
+                    "reconcile_orphans: 删除 {name} 失败（跳过）: {err}",
+                    name=name,
+                    err=e,
+                )
+            except Exception as e:  # noqa: BLE001 — 单个删除失败不影响其余
+                with contextlib.suppress(Exception):
+                    logger.warning(
+                        "reconcile_orphans: 删除 {name} 异常（跳过）: {err}",
+                        name=name,
+                        err=e,
+                    )
+        if deleted:
+            logger.info("reconcile_orphans: 共删除 {n} 个孤儿 sandbox Pod", n=deleted)
+        return deleted
 
     async def attach(self, handle: SandboxHandle) -> KimoExecStream:
         stream = KimoExecStream()
