@@ -280,10 +280,21 @@ class KimoExecStream:
         return bytes(self._error_buf)
 
     def returncode(self) -> int | None:
-        """Exec command exit code (parsed from the error channel by WSClient)."""
+        """Exec command exit code (parsed from the error channel by WSClient).
+
+        ``WSClient.returncode`` is a property that, on a closed stream, does
+        ``yaml.safe_load(read_channel(ERROR))['status']`` — if the error channel
+        is empty (no exit Status frame) ``safe_load("")`` is ``None`` → ``None[
+        'status']`` raises ``'NoneType' object is not subscriptable`` (live-
+        verified 2026-06-25: this crashed the gateway read loop on worker exit,
+        masking the real stderr). Guard it: unknown exit code → ``None``.
+        """
         if self._ws is None:
             return None
-        return getattr(self._ws, "returncode", None)
+        try:
+            return self._ws.returncode
+        except Exception:  # noqa: BLE001 — WSClient.returncode 可能因空 error 通道崩
+            return None
 
     def _is_ws_open(self) -> bool:
         if self._ws is None:
