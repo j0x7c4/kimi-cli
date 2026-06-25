@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -40,6 +41,22 @@ _WORKER_PORT = 5494
 _CPU = "2"
 _MEMORY = "4Gi"
 _GRACE_S = 10
+
+# Pod 主进程 = keepalive；worker 经 exec 起（cci_process attach → /start-sandbox.sh）。
+# 镜像 CMD 是 /start-sandbox.sh（worker 读主进程 stdin），但 CCI 不喂主 stdin → worker 读 EOF
+# 即退出 → Pod Failed（2026-06-25 整链实测）。改主进程 keepalive，worker 由 gateway 经 exec 驱动。
+_KEEPALIVE_CMD = ["sleep", "infinity"]
+
+
+def _label_safe(value: str, fallback: str = "x") -> str:
+    """Coerce to a valid k8s label value (CCI admission 强校验，2026-06-25 实测).
+
+    规则：仅 ``[A-Za-z0-9._-]``、首尾必须字母数字、≤63。``__anonymous__`` 这类首尾下划线
+    会被 CCI 拒（HTTP 422）。非法字符→``-``，首尾非字母数字剥除，空则回退 ``fallback``。
+    """
+    v = re.sub(r"[^A-Za-z0-9._-]", "-", value or "")[:63]
+    v = v.strip("._-")
+    return v or fallback
 
 
 class CCISpawner:
@@ -155,8 +172,8 @@ class CCISpawner:
                 "namespace": self.namespace,
                 "labels": {
                     "app": app_label,
-                    "owner": (owner_id or "")[:63],
-                    "session_id": str(sid)[:63],
+                    "owner": _label_safe(owner_id, "anon"),
+                    "session_id": _label_safe(str(sid)),
                 },
                 # 无 yangtse.io/* 注解: 网络由 namespace default Network 决定 (§4).
             },
@@ -166,6 +183,8 @@ class CCISpawner:
                         "name": "sandbox",
                         "image": self.image,
                         "imagePullPolicy": "Always",
+                        # 主进程 keepalive；worker 经 exec 起（见 _KEEPALIVE_CMD 注释）。
+                        "command": _KEEPALIVE_CMD,
                         "stdin": True,  # ★ warm BIND / attach 必需
                         "tty": False,
                         "resources": {
