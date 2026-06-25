@@ -39,13 +39,36 @@ class SubagentNotFoundError(RuntimeError):
 
 async def run_worker(session_id: UUID) -> None:
     """Run the KimiCLI worker for a session."""
-    # Find session by ID using the web store
+    # Find session by ID using the web store (disk-based registry).
     joint_session = load_session_by_id(session_id)
-    if joint_session is None:
-        raise ValueError(f"Session not found: {session_id}")
+    if joint_session is not None:
+        session = joint_session.kimi_cli_session
+    else:
+        # hechun-fork-cci: CCI serverless Pod 无法 bind-mount gateway 宿主的 session
+        # 目录（docker 路径靠 bind-mount，container.py:274-281），故 worker 在 Pod 内
+        # load_session_by_id 必然为 None。用同一 session_id + env 的 work_dir 本地构造
+        # 新 session（context 空起；session state / memory 走 storage 后端 MySQL 持久化）。
+        # 新会话即可用；历史 resume 不跨 Pod（MVP 取舍，2026-06-25 用户拍板方案③）。
+        from kaos.path import KaosPath  # noqa: PLC0415
 
-    # Get the kimi-cli session object
-    session = joint_session.kimi_cli_session
+        from kimi_cli.session import Session as KimiCLISession  # noqa: PLC0415
+
+        work_dir_env = os.environ.get("KIMI_WORK_DIR") or "/app"
+        work_dir = KaosPath.unsafe_from_local_path(Path(work_dir_env))
+        logger.info(
+            "Session {sid} not on Pod disk (CCI no bind-mount); constructing fresh "
+            "session from env at work_dir={wd}",
+            sid=str(session_id),
+            wd=work_dir_env,
+        )
+        session = await KimiCLISession.create(work_dir=work_dir, session_id=str(session_id))
+        # owner_id 取自 gateway 转发的 KIMI_USER_ID，供 memory 归属（缺省走 sentinel）。
+        owner_env = os.environ.get("KIMI_USER_ID") or None
+        if owner_env:
+            import contextlib  # noqa: PLC0415
+
+            with contextlib.suppress(Exception):  # owner 设置失败不阻塞启动
+                session.state.owner_id = owner_env
 
     # Load default MCP config file if it exists
     default_mcp_file = get_global_mcp_config_file()
