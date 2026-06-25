@@ -343,23 +343,38 @@ echo CCI_DIAG_DONE
 
 
 async def cmd_diag() -> int:
-    """整链前置体检：真镜像 sleep Pod 内 exec，验 worker 可导入 + LLM/公网 egress。"""
+    """整链前置体检：真镜像 sleep Pod 内 exec，验 worker 可导入 + Pod→代理可达。
+
+    设 ``SMOKE_PROXY_URL``（如 http://192.168.0.50:4000）则在 Pod 内探代理 health —— 这是
+    "worker 经 in-VPC 代理出网"路线的关键验收（公网 egress 探测仍保留作对照，预期不通）。
+    """
+    proxy = os.environ.get("SMOKE_PROXY_URL", "").strip().rstrip("/")
+    script = _DIAG_SCRIPT
+    if proxy:
+        probe = (
+            "P='import urllib.request as u,sys; "
+            'print(u.urlopen(sys.argv[1]+"/health/liveliness",timeout=8).read().decode())\'\n'
+            f"printf '[proxy {proxy}] '; python3 -c \"$P\" {proxy} 2>&1 | tail -1\n"
+        )
+        script = script.replace("echo CCI_DIAG_DONE", probe + "echo CCI_DIAG_DONE")
 
     async def _exec_fn(endpoint, ns, name, tp):
-        stage("EXEC", "diag: worker-import / LLM+public egress")
+        stage("EXEC", "diag: worker-import / Pod→proxy / public egress(对照)")
         out, ec = await _exec_probe(
             endpoint, ns, name, tp,
-            cmd=["/bin/sh", "-c", _DIAG_SCRIPT], done_marker="CCI_DIAG_DONE",
+            cmd=["/bin/sh", "-c", script], done_marker="CCI_DIAG_DONE",
         )
         stage("DIAG_OUTPUT")
         for ln in out.splitlines():
             info(f"  {ln}")
         info(f"exec returncode={ec}")
         ok_worker = "[worker-import] OK" in out
-        ok_egress = "[egress moonshot:443] connect OK" in out
-        info(f"判定：worker-import={'✅' if ok_worker else '❌'}  "
-             f"LLM-egress={'✅' if ok_egress else '❌（整链需 NAT/SNAT 出网）'}")
-        return 0 if (ok_worker and ok_egress) else 1
+        ok_proxy = bool(proxy) and f"[proxy {proxy}]" in out and "alive" in out.lower()
+        verdict = f"判定：worker-import={'✅' if ok_worker else '❌'}"
+        verdict += (f"  Pod→proxy={'✅' if ok_proxy else '❌'}" if proxy
+                    else "  (未设 SMOKE_PROXY_URL，跳过代理探测)")
+        info(verdict)
+        return 0 if (ok_worker and (ok_proxy or not proxy)) else 1
 
     rc = await _with_pod(_exec_fn)
     print()
