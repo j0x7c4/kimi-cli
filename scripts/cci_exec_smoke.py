@@ -239,7 +239,12 @@ async def cmd_ensure_secret() -> int:
     return 0
 
 
-async def cmd_run() -> int:
+async def _with_pod(exec_fn) -> int:
+    """sweep→建 sleep Pod→等 Running→exec_fn(endpoint,ns,name,tp)→finally 删 Pod。
+
+    exec_fn 返回 rc（0=pass）。master alarm 兜底 + finally 保证删 Pod（含被
+    SIGALRM 打断时）。run/diag 共用这套生命周期，删 Pod 逻辑只此一份。
+    """
     client, token_provider, endpoint, ns, image, region = _build()
     name = f"kimo-smoke-{uuid.uuid4().hex[:12]}"
     info(f"endpoint={endpoint} ns={ns} region={region}")
@@ -271,20 +276,7 @@ async def cmd_run() -> int:
         pod_ip = await _wait_running(client, ns, name)
         ok(f"Running, podIP={pod_ip}")
 
-        stage("EXEC", "open channel.k8s.io WebSocket (IAM token → 101 handshake)")
-        out, ec = await _exec_probe(endpoint, ns, name, token_provider)
-
-        stage("EXEC_OUTPUT")
-        for ln in out.splitlines():
-            info(f"stdout| {ln}")
-        info(f"exec returncode={ec}")
-
-        if "HELLO_FROM_CCI_POD" in out and "CCI_EXEC_DONE" in out:
-            ok("exec stdout sentinel matched — 101 握手 + channel.k8s.io 分帧通")
-            rc = 0
-        else:
-            fail("exec stdout 未含 sentinel（握手/分帧/命令异常）")
-            rc = 1
+        rc = await exec_fn(endpoint, ns, name, token_provider)
     except CciApiError as e:
         fail(f"CCI API error: {e}")
     except TimeoutError as e:
@@ -310,9 +302,69 @@ async def cmd_run() -> int:
                     fail(f"cleanup delete failed: {e} —— ⚠️ 手动确认 ns={ns} 无残留 {name}")
             except Exception as e:  # noqa: BLE001
                 fail(f"cleanup error: {e} —— ⚠️ 手动确认 ns={ns} 无残留 {name}")
+    return rc
 
+
+async def cmd_run() -> int:
+    async def _exec_fn(endpoint, ns, name, tp):
+        stage("EXEC", "open channel.k8s.io WebSocket (IAM token → 101 handshake)")
+        out, ec = await _exec_probe(endpoint, ns, name, tp)
+        stage("EXEC_OUTPUT")
+        for ln in out.splitlines():
+            info(f"stdout| {ln}")
+        info(f"exec returncode={ec}")
+        if "HELLO_FROM_CCI_POD" in out and "CCI_EXEC_DONE" in out:
+            ok("exec stdout sentinel matched — 101 握手 + channel.k8s.io 分帧通")
+            return 0
+        fail("exec stdout 未含 sentinel（握手/分帧/命令异常）")
+        return 1
+
+    rc = await _with_pod(_exec_fn)
     print()
     banner = _c("32", "===== SMOKE PASS =====") if rc == 0 else _c("31", "===== SMOKE FAIL =====")
+    print(banner, flush=True)
+    return rc
+
+
+# 整链前置体检脚本（真镜像 sleep Pod 内 exec 跑）：验 worker 可导入 + LLM/公网
+# egress（整链最致命未知：Pod 无 NAT/SNAT → worker 调不到 api.moonshot.cn）。
+_DIAG_SCRIPT = r"""
+echo CCI_DIAG_BEGIN
+echo "[os] $(head -1 /etc/os-release 2>/dev/null); arch=$(uname -m)"
+echo "[py] $(python3 --version 2>&1)"
+W='import kimi_cli.web.runner.worker as w; print("OK", w.__file__)'
+printf '[worker-import] '; python3 -c "$W" 2>&1 | tail -1
+printf '[app-ls] '; ls /app 2>/dev/null | tr '\n' ' '; echo
+C='import socket,sys; socket.create_connection((sys.argv[1],443),timeout=8); print("connect OK")'
+printf '[egress moonshot:443] '; python3 -c "$C" api.moonshot.cn 2>&1 | tail -1
+printf '[egress pypi:443] '; python3 -c "$C" pypi.org 2>&1 | tail -1
+echo CCI_DIAG_DONE
+"""
+
+
+async def cmd_diag() -> int:
+    """整链前置体检：真镜像 sleep Pod 内 exec，验 worker 可导入 + LLM/公网 egress。"""
+
+    async def _exec_fn(endpoint, ns, name, tp):
+        stage("EXEC", "diag: worker-import / LLM+public egress")
+        out, ec = await _exec_probe(
+            endpoint, ns, name, tp,
+            cmd=["/bin/sh", "-c", _DIAG_SCRIPT], done_marker="CCI_DIAG_DONE",
+        )
+        stage("DIAG_OUTPUT")
+        for ln in out.splitlines():
+            info(f"  {ln}")
+        info(f"exec returncode={ec}")
+        ok_worker = "[worker-import] OK" in out
+        ok_egress = "[egress moonshot:443] connect OK" in out
+        info(f"判定：worker-import={'✅' if ok_worker else '❌'}  "
+             f"LLM-egress={'✅' if ok_egress else '❌（整链需 NAT/SNAT 出网）'}")
+        return 0 if (ok_worker and ok_egress) else 1
+
+    rc = await _with_pod(_exec_fn)
+    print()
+    banner = (_c("32", "===== DIAG PASS =====") if rc == 0
+              else _c("33", "===== DIAG INCOMPLETE ====="))
     print(banner, flush=True)
     return rc
 
@@ -354,21 +406,24 @@ async def _wait_running(client: CciRestClient, ns: str, name: str) -> str:
 
 
 async def _exec_probe(
-    endpoint: str, ns: str, name: str, token_provider: TokenProvider
+    endpoint: str, ns: str, name: str, token_provider: TokenProvider,
+    *, cmd: list[str] | None = None, done_marker: str = "CCI_EXEC_DONE",
 ) -> tuple[str, int | None]:
-    cmd = [
-        "/bin/sh",
-        "-c",
-        "echo CCI_EXEC_BEGIN; uname -a; id; "
-        "(head -1 /etc/os-release 2>/dev/null || true); "
-        "echo HELLO_FROM_CCI_POD; echo CCI_EXEC_DONE",
-    ]
+    if cmd is None:
+        cmd = [
+            "/bin/sh",
+            "-c",
+            "echo CCI_EXEC_BEGIN; uname -a; id; "
+            "(head -1 /etc/os-release 2>/dev/null || true); "
+            "echo HELLO_FROM_CCI_POD; echo CCI_EXEC_DONE",
+        ]
     stream = KimoExecStream()
     info("fetching IAM token (hw_ak_sk getToken)…")
     await stream.connect(endpoint, ns, name, token_provider, command=cmd)
     ok("WebSocket connected (101 Switching Protocols)")
 
     collected = bytearray()
+    marker = done_marker.encode()
     deadline = time.monotonic() + EXEC_READ_DEADLINE_S
     try:
         while time.monotonic() < deadline:
@@ -376,7 +431,7 @@ async def _exec_probe(
             if line == b"":
                 break  # EOF
             collected.extend(line)
-            if b"CCI_EXEC_DONE" in bytes(line):
+            if marker in bytes(line):
                 # 给 stderr/error channel 一点时间 flush returncode
                 break
         ec = stream.returncode()
@@ -390,10 +445,13 @@ async def _exec_probe(
 
 def main() -> int:
     cmd = sys.argv[1] if len(sys.argv) > 1 else "run"
-    table = {"run": cmd_run, "sweep": cmd_sweep, "ensure-secret": cmd_ensure_secret}
+    table = {
+        "run": cmd_run, "diag": cmd_diag,
+        "sweep": cmd_sweep, "ensure-secret": cmd_ensure_secret,
+    }
     fn = table.get(cmd)
     if fn is None:
-        fail(f"未知子命令 {cmd!r}（run|sweep|ensure-secret）")
+        fail(f"未知子命令 {cmd!r}（run|diag|sweep|ensure-secret）")
         return 2
     return asyncio.run(fn())
 
