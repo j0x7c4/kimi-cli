@@ -107,19 +107,23 @@ def _migrate_legacy_metadata(session_dir: Path, state: SessionState) -> str:
 
 
 def load_session_state(session_dir: Path) -> SessionState:
-    # M4 §2.4.2.C / J: under postgres backend, the file ``state.json`` is **stale**
-    # (sessions.py:create_session writes owner_id / approval.yolo via storage only,
-    # not back to disk). All callers — including KimiSession.__init__ inside the
-    # sandbox — must see the PG row as source of truth, otherwise approval.yolo /
-    # owner_id stays False / None and Memory.add(persistent) blocks on approval
-    # forever (踩过 2026-06-04，see feedback_kimo_owner_id_disk_stale_under_pg_backend).
+    # M4 §2.4.2.C / J: under a DB backend (postgres OR mysql) the file
+    # ``state.json`` is **stale** (sessions.py:create_session writes owner_id /
+    # approval.yolo via storage only, not back to disk). All callers — including
+    # KimiSession.__init__ inside the sandbox — must see the DB row as source of
+    # truth, otherwise approval.yolo / owner_id stays False / None and
+    # Memory.add(persistent) blocks on approval forever (踩过 2026-06-04，see
+    # feedback_kimo_owner_id_disk_stale_under_pg_backend).
     #
-    # Strategy: when storage backend is "postgres", probe storage first using the
-    # UUID embedded in ``session_dir.name``. Storage miss / parse error → fall back
-    # to file path so file-mode + older callsites keep working bit-for-bit.
+    # 2026-06-25: kimo 已迁 mysql（spec 2026-06-24 §8）→ 这里必须把 mysql 也算 DB
+    # 后端，否则 CCI worker 起 fresh session 时读不到 DB 里的 yolo → iOS Memory 卡死。
+    #
+    # Strategy: under a DB backend, probe storage first using the UUID embedded in
+    # ``session_dir.name``. Storage miss / parse error → fall back to file path so
+    # file-mode + older callsites keep working bit-for-bit.
     import os as _os
 
-    if _os.environ.get("KIMI_STORAGE_BACKEND", "file").lower() == "postgres":
+    if _os.environ.get("KIMI_STORAGE_BACKEND", "file").lower() in ("postgres", "mysql"):
         try:
             kimo_session_id = UUID(session_dir.name)
         except (ValueError, AttributeError):

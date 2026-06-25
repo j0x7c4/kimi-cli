@@ -18,6 +18,9 @@ agent:
     - "kimi_cli.tools.file:ReadMediaFile"
     - "kimi_cli.tools.web:SearchWeb"
     - "kimi_cli.tools.web:FetchURL"
+    # 长期记忆（spec §2.4.2.C）：persistent scope 走 PgKimoStorage 写 ai_user_memory，
+    # user_id 从 owner_id 前缀 "hechun-<bigint>" 解析；session scope 仅本会话有效。
+    - "kimi_cli.tools.memory:Memory"
   subagents: ~
   allowed_skills: []
   knowledge_base: false

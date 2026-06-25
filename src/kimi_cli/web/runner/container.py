@@ -100,6 +100,43 @@ def _read_subagent_from_disk(session_id: UUID) -> str | None:
     return None
 
 
+def _read_agent_name_from_disk(session_id: UUID) -> str | None:
+    """Resolve the agent NAME to forward as ``SUBAGENT`` into a CCI Pod.
+
+    Returns the ``subagent`` field if set, else the stem of ``agent_spec_path``
+    (e.g. ``/root/.kimi/agents/diabetes-expert.yaml`` → ``diabetes-expert``).
+
+    Why CCI needs this but docker doesn't: the docker sandbox bind-mounts the
+    session dir, so the worker reads ``agent_spec_path`` straight out of
+    ``session_config.json``.  The CCI worker constructs a *fresh* session on the
+    Pod (no ``session_config.json`` there — :func:`run_worker` falls back to
+    ``KimiCLISession.create``), so the gateway must forward the agent *name* and
+    let the worker resolve it by name against the downloaded ``~/.kimi/agents``
+    bundle.  ``agent_name`` sessions land as ``agent_spec_path`` (not
+    ``subagent``) in the config, so :func:`_read_subagent_from_disk` returns
+    ``None`` for them — this helper covers that case.
+    """
+    share = os.environ.get("KIMI_SHARE_DIR")
+    if not share:
+        return None
+    sessions_root = Path(share) / "sessions"
+    if not sessions_root.is_dir():
+        return None
+    for cfg_file in sessions_root.glob(f"*/{session_id}/session_config.json"):
+        try:
+            data = json.loads(cfg_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        sub = data.get("subagent")
+        if isinstance(sub, str) and sub.strip():
+            return sub.strip()
+        spec_path = data.get("agent_spec_path")
+        if isinstance(spec_path, str) and spec_path.strip():
+            return Path(spec_path.strip()).stem
+        return None
+    return None
+
+
 # Environment variable names to forward into sandbox containers
 _SANDBOX_ENV_VARS = [
     # LLM configuration

@@ -44,6 +44,8 @@ class TestMetricSet:
         state.metrics["cci_api_error_total"].labels(operation="create_pod", code="500").inc()
         state.metrics["cci_network_ip_status"].set(0)
 
+        state.metrics["agent_load_failure_total"].labels(reason="subagent_unresolved").inc()
+
         text = generate_latest(state.registry).decode("utf-8")
         for name in (
             "kimo_sandbox_spawn_total",
@@ -54,6 +56,7 @@ class TestMetricSet:
             "kimo_active_sandboxes",
             "kimo_cci_api_error_total",
             "kimo_cci_network_ip_status",
+            "kimo_agent_load_failure_total",
         ):
             assert name in text
 
@@ -84,6 +87,76 @@ class TestMetricSet:
 
         text = generate_latest(state.registry).decode("utf-8")
         assert "kimo_cci_network_ip_status 2.0" in text
+
+
+class TestInstrumentationHelpers:
+    """spec §7.2 runtime emit helpers used by the CCI spawn / stop / error paths."""
+
+    def test_record_spawn_and_active_and_duration(self):
+        state = MetricsState()
+        state.record_spawn(backend="cci", result="success")
+        state.record_spawn(backend="cci", result="timeout")
+        state.inc_active_sandboxes(1)
+        state.inc_active_sandboxes(-1)
+        state.observe_spawn_duration(backend="cci", seconds=1.5)
+        state.record_cci_api_error(operation="create_pod", code="500")
+
+        assert (
+            state.registry.get_sample_value(
+                "kimo_sandbox_spawn_total", {"backend": "cci", "result": "success"}
+            )
+            == 1.0
+        )
+        assert (
+            state.registry.get_sample_value(
+                "kimo_sandbox_spawn_total", {"backend": "cci", "result": "timeout"}
+            )
+            == 1.0
+        )
+        assert state.registry.get_sample_value("kimo_active_sandboxes", {}) == 0.0
+        assert (
+            state.registry.get_sample_value(
+                "kimo_sandbox_spawn_duration_seconds_count", {"backend": "cci"}
+            )
+            == 1.0
+        )
+        assert (
+            state.registry.get_sample_value(
+                "kimo_cci_api_error_total", {"operation": "create_pod", "code": "500"}
+            )
+            == 1.0
+        )
+
+    def test_record_agent_load_failure_increments_reason_label(self):
+        # hechun-fork-cci: kimo_agent_load_failure_total{reason} +1 per refusal.
+        state = MetricsState()
+        state.record_agent_load_failure(reason="agent_required_missing")
+        state.record_agent_load_failure(reason="agent_required_missing")
+        state.record_agent_load_failure(reason="subagent_unresolved")
+
+        assert (
+            state.registry.get_sample_value(
+                "kimo_agent_load_failure_total", {"reason": "agent_required_missing"}
+            )
+            == 2.0
+        )
+        assert (
+            state.registry.get_sample_value(
+                "kimo_agent_load_failure_total", {"reason": "subagent_unresolved"}
+            )
+            == 1.0
+        )
+
+    def test_helpers_never_raise_on_bad_handle(self):
+        # If a metric handle were somehow missing/broken, helpers must swallow.
+        state = MetricsState()
+        state.metrics = {}  # type: ignore[assignment]
+        # none of these should raise despite the empty metrics dict.
+        state.record_spawn(backend="cci", result="success")
+        state.observe_spawn_duration(backend="cci", seconds=0.1)
+        state.inc_active_sandboxes(1)
+        state.record_cci_api_error(operation="x", code="y")
+        state.record_agent_load_failure(reason="agent_required_missing")
 
 
 class _FakeRequest:

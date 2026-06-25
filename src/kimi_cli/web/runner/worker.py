@@ -25,6 +25,19 @@ from kimi_cli.exception import MCPConfigError
 from kimi_cli.web.runner.mcp_discovery import load_auto_discovered_mcp_configs
 from kimi_cli.web.store.sessions import load_session_by_id
 
+# hechun-fork-cci: dedicated worker exit code for "the required agent could not
+# be loaded, refusing to start". The gateway (CCISessionProcess) recognises this
+# specific code on worker EOF → records kimo_agent_load_failure_total + broadcasts
+# a clear client-visible error, instead of treating it like a generic crash. Any
+# value outside the normal 0/1/130/137… range works; 42 is unambiguous.
+AGENT_LOAD_FAILURE_EXIT_CODE = 42
+
+# reason label values for kimo_agent_load_failure_total{reason} (mirrors
+# MetricsState.record_agent_load_failure). Kept here next to the raise sites so
+# the worker can stamp the reason onto the wire error it emits before exiting.
+_REASON_SUBAGENT_UNRESOLVED = "subagent_unresolved"
+_REASON_AGENT_REQUIRED_MISSING = "agent_required_missing"
+
 
 class SubagentNotFoundError(RuntimeError):
     """Raised when the sandbox is launched with a ``SUBAGENT`` env var that
@@ -36,9 +49,123 @@ class SubagentNotFoundError(RuntimeError):
     the wrong system prompt + tool set serve real users.
     """
 
+    #: metric reason label stamped when this error aborts worker startup.
+    reason = _REASON_SUBAGENT_UNRESOLVED
+
+
+class AgentRequiredError(RuntimeError):
+    """Raised when ``KIMI_REQUIRE_AGENT`` is truthy but agent resolution still
+    landed on the default agent (``agent_file is None``).
+
+    The gateway sets ``KIMI_REQUIRE_AGENT=1`` whenever it forwards a specific
+    agent name (``SUBAGENT``) for a session — i.e. this session *requires* that
+    agent. Falling back to the default agent here would silently serve users the
+    wrong system prompt + tool set, so the worker refuses to start instead. This
+    is distinct from :class:`SubagentNotFoundError` (which fires when a
+    ``SUBAGENT`` name was set but unresolvable): ``AgentRequiredError`` guards the
+    case where no concrete agent was selected at all yet one was demanded.
+    """
+
+    #: metric reason label stamped when this error aborts worker startup.
+    reason = _REASON_AGENT_REQUIRED_MISSING
+
+
+def _is_truthy_env(name: str) -> bool:
+    """Whether env var ``name`` is set to a truthy value (1/true/yes)."""
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+# hechun-fork-cci: env switch the gateway injects (alongside SUBAGENT) to demand
+# fail-fast agent loading. Absent on docker/local → worker keeps the old
+# fall-back-to-default behaviour, so this is fully backward compatible.
+_REQUIRE_AGENT_ENV = "KIMI_REQUIRE_AGENT"
+
+
+# hechun-fork-cci: env names the gateway injects into a CCI Pod worker so it can
+# pull static assets the Pod can't bind-mount (see web/api/sandbox_assets.py and
+# web/runner/cci_process.py). Absent on the docker path → worker skips download.
+_ASSETS_URL_ENV = "KIMO_SANDBOX_ASSETS_URL"
+_ASSETS_TOKEN_ENV = "KIMO_SANDBOX_ASSETS_TOKEN"
+
+
+def _is_safe_tar_member(name: str) -> bool:
+    """Reject absolute paths and ``..`` traversal in a tar member name.
+
+    The bundle is produced by our own gateway, but the worker still validates
+    before extracting under ``$HOME`` so a compromised/garbled response can't
+    write outside the home dir.
+    """
+    if not name or name.startswith("/") or name.startswith("\\"):
+        return False
+    parts = Path(name).parts
+    return ".." not in parts
+
+
+def _fetch_sandbox_assets() -> None:
+    """Download + unpack the gateway sandbox-assets bundle under ``$HOME``.
+
+    CCI serverless Pods cannot bind-mount the gateway host, so static files the
+    worker resolves off local disk (``~/.kimi/agents`` custom agent specs, and
+    later a knowledge base etc.) are fetched over HTTP from the gateway's
+    internal endpoint and extracted into ``$HOME`` before agent resolution runs.
+
+    No-op when ``KIMO_SANDBOX_ASSETS_URL`` is unset (the docker path never
+    injects it; its bind-mount is the source there). Download/extract failures
+    are logged loudly but do NOT raise: this is the critical path for CCI agent
+    config, and an opaque crash here would surface downstream as a misleading
+    ``SubagentNotFoundError``, so we keep the explicit "failed to fetch sandbox
+    assets from gateway" log as the breadcrumb.
+    """
+    url = os.environ.get(_ASSETS_URL_ENV, "").strip()
+    if not url:
+        return
+
+    import io  # noqa: PLC0415
+    import tarfile  # noqa: PLC0415
+
+    import httpx  # noqa: PLC0415
+
+    token = os.environ.get(_ASSETS_TOKEN_ENV, "").strip()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    home = Path.home()
+    try:
+        resp = httpx.get(url, headers=headers, timeout=30.0)
+        resp.raise_for_status()
+        data = resp.content
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tar:
+            members = [m for m in tar.getmembers() if _is_safe_tar_member(m.name)]
+            rejected = len(tar.getmembers()) - len(members)
+            if rejected:
+                logger.warning(
+                    "[sandbox-assets] rejected {n} unsafe tar member(s) (path traversal)",
+                    n=rejected,
+                )
+            tar.extractall(path=home, members=members)  # noqa: S202 — members filtered above
+        logger.info(
+            "[sandbox-assets] fetched + extracted bundle from gateway "
+            "({size} bytes, {n} members) into {home}",
+            size=len(data),
+            n=len(members),
+            home=str(home),
+        )
+    except Exception as e:  # noqa: BLE001 — must not crash worker startup
+        logger.error(
+            "[sandbox-assets] failed to fetch sandbox assets from gateway url={url}: {err}. "
+            "Custom agent config (e.g. SUBAGENT yaml) may be missing on this Pod.",
+            url=url,
+            err=e,
+        )
+
 
 async def run_worker(session_id: UUID) -> None:
     """Run the KimiCLI worker for a session."""
+    # hechun-fork-cci: on the CCI path the Pod can't bind-mount the gateway
+    # host, so pull static assets (~/.kimi/agents custom agent specs, etc.) from
+    # the gateway and unpack them under $HOME BEFORE agent resolution below
+    # consumes them. No-op on docker/local (env not injected). Run off-thread:
+    # httpx.get is blocking and run_worker drives an asyncio event loop.
+    await asyncio.to_thread(_fetch_sandbox_assets)
+
     # Find session by ID using the web store (disk-based registry).
     joint_session = load_session_by_id(session_id)
     if joint_session is not None:
@@ -62,12 +189,36 @@ async def run_worker(session_id: UUID) -> None:
             wd=work_dir_env,
         )
         session = await KimiCLISession.create(work_dir=work_dir, session_id=str(session_id))
-        # owner_id 取自 gateway 转发的 KIMI_USER_ID，供 memory 归属（缺省走 sentinel）。
-        owner_env = os.environ.get("KIMI_USER_ID") or None
-        if owner_env:
-            import contextlib  # noqa: PLC0415
+        # CCI fresh session 的 state 是空的（create() → SessionState()，approval.yolo=False，
+        # refresh() 只补 title）。gateway 在 create_session 已把权威 state（approval.yolo +
+        # auto-approves + owner_id）写进 storage 后端（mysql，kimo_session_state 行，
+        # sessions.py:437/440）。这里读回来覆盖到 fresh session.state —— 否则 yolo 丢失，
+        # Memory.add(persistent) 要审批，而 iOS/Flutter 简化 UI 无审批路径 → 永久卡死
+        # （2026-06-25 实测；effective_yolo = yolo or session.state.approval.yolo，agent.py）。
+        import contextlib  # noqa: PLC0415
 
-            with contextlib.suppress(Exception):  # owner 设置失败不阻塞启动
+        owner_env = os.environ.get("KIMI_USER_ID") or None
+        try:
+            from kimi_cli.session_state import load_session_state_via_storage  # noqa: PLC0415
+            from kimi_cli.storage import build_storage  # noqa: PLC0415
+
+            _persisted = load_session_state_via_storage(session_id, build_storage())
+            session.state.approval = _persisted.approval  # yolo / afk / auto_approve_actions
+            if _persisted.owner_id:
+                session.state.owner_id = _persisted.owner_id
+            logger.info(
+                "CCI fresh session loaded persisted state from storage: yolo={y} owner={o}",
+                y=session.state.approval.yolo,
+                o=session.state.owner_id,
+            )
+        except Exception as _e:  # noqa: BLE001 — storage miss/err 不阻塞启动
+            logger.warning(
+                "CCI fresh session storage-state load failed ({err}); env owner fallback only",
+                err=_e,
+            )
+        # owner_id env 兜底（storage 无 owner / 非 mysql 后端时）。
+        if owner_env and not session.state.owner_id:
+            with contextlib.suppress(Exception):
                 session.state.owner_id = owner_env
 
     # Load default MCP config file if it exists
@@ -157,6 +308,28 @@ async def run_worker(session_id: UUID) -> None:
         )
         agent_file = subagent_path
 
+    # hechun-fork-cci: fail-fast guard (KIMI_REQUIRE_AGENT). The gateway sets
+    # this whenever it forwarded a specific agent name for this session, so the
+    # session REQUIRES that agent. If every resolution path above still left
+    # agent_file None (e.g. the SUBAGENT env got dropped, or the assets bundle
+    # never delivered the yaml), we'd otherwise fall back to the default agent and
+    # silently serve the wrong agent. Refuse to start instead — main() turns this
+    # into a clear client-visible wire error + AGENT_LOAD_FAILURE_EXIT_CODE.
+    if agent_file is None and _is_truthy_env(_REQUIRE_AGENT_ENV):
+        logger.error(
+            "{env} is set but agent resolution produced no agent_file "
+            "(SUBAGENT={sub!r}); refusing to start with the default agent.",
+            env=_REQUIRE_AGENT_ENV,
+            sub=subagent_name,
+        )
+        raise AgentRequiredError(
+            f"{_REQUIRE_AGENT_ENV} is set (this session requires a specific agent) "
+            f"but none was resolved (SUBAGENT={subagent_name!r}). Refusing to fall "
+            "back to the default agent. Check that the gateway forwarded SUBAGENT "
+            "and that the agent yaml was delivered to this Pod "
+            "(~/.kimi/agents/<name>.yaml via the sandbox-assets bundle)."
+        )
+
     # Create KimiCLI instance with MCP configuration
     try:
         kimi_cli = await KimiCLI.create(
@@ -186,6 +359,39 @@ async def run_worker(session_id: UUID) -> None:
     await kimi_cli.run_wire_stdio()
 
 
+def _emit_agent_load_failure_to_wire(message: str, reason: str) -> None:
+    """Write ONE JSON-RPC error frame to the wire stdout (fd 1) before exit.
+
+    The worker dies before ``run_wire_stdio`` brings the WireServer up, and
+    ``enable_logging`` has dup2'd fd 2 into ``kimi.log`` — so a bare traceback is
+    invisible to the client. stdout (fd 1) is the wire channel the gateway reads
+    line-by-line and broadcasts, so emitting a newline-terminated JSON-RPC error
+    frame here is what actually surfaces the failure to the user. ``code`` reuses
+    the dedicated exit code so the frame is self-describing; the gateway also
+    detects the process exit code itself and re-broadcasts + records the metric.
+
+    Best-effort: any failure to write must not mask the original error (the exit
+    code is the gateway's authoritative signal regardless).
+    """
+    import contextlib  # noqa: PLC0415
+
+    with contextlib.suppress(Exception):
+        frame = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": "agent-load-failure",
+                "error": {
+                    "code": AGENT_LOAD_FAILURE_EXIT_CODE,
+                    "message": message,
+                    "data": {"reason": reason},
+                },
+            },
+            ensure_ascii=False,
+        )
+        sys.stdout.write(frame + "\n")
+        sys.stdout.flush()
+
+
 def main() -> None:
     """Entry point for the worker subprocess."""
     from kimi_cli.utils.proctitle import set_process_title
@@ -208,7 +414,22 @@ def main() -> None:
     enable_logging(debug=False)
 
     # Run the async worker
-    asyncio.run(run_worker(session_id))
+    try:
+        asyncio.run(run_worker(session_id))
+    except (AgentRequiredError, SubagentNotFoundError) as exc:
+        # hechun-fork-cci: required agent failed to load. Surface a clear error
+        # to the client over the wire stdout (the traceback alone goes to
+        # kimi.log, invisible to the user — see _emit_agent_load_failure_to_wire)
+        # and exit with the dedicated code so the gateway can record the metric +
+        # re-broadcast a clean message.
+        reason = getattr(exc, "reason", _REASON_AGENT_REQUIRED_MISSING)
+        logger.error(
+            "Agent load failed ({reason}); refusing to start: {err}",
+            reason=reason,
+            err=exc,
+        )
+        _emit_agent_load_failure_to_wire(str(exc), reason)
+        sys.exit(AGENT_LOAD_FAILURE_EXIT_CODE)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ Metric set (spec §7.2):
 
 from __future__ import annotations
 
+import contextlib
 import os
 import secrets
 from typing import TYPE_CHECKING
@@ -93,6 +94,19 @@ def _build_metrics():
             "CCI default-network IP pool status (0 Ready / 1 IPInsufficient / 2 Failed)",
             registry=registry,
         ),
+        # hechun-fork-cci: a worker that was REQUIRED to load a specific agent
+        # (gateway forwarded SUBAGENT + KIMI_REQUIRE_AGENT) but couldn't resolve
+        # it refuses to start (fail-fast, never serves users the wrong agent) and
+        # exits with AGENT_LOAD_FAILURE_EXIT_CODE. The gateway counts each such
+        # exit here so a mis-mounted skill bundle is visible on the dashboard
+        # immediately instead of silently degrading. ``reason`` ∈
+        # {subagent_unresolved, agent_required_missing}.
+        "agent_load_failure_total": Counter(
+            "kimo_agent_load_failure_total",
+            "Sandbox worker refused to start because its required agent failed to load",
+            ["reason"],
+            registry=registry,
+        ),
     }
     return registry, metrics
 
@@ -138,6 +152,46 @@ class MetricsState:
         except Exception:  # noqa: BLE001 — metrics must never crash the gateway
             value = _IP_STATUS_FAILED
         self.metrics["cci_network_ip_status"].set(value)
+
+    # ── runtime instrumentation helpers (spec §7.2) ─────────────────────────────
+    # Call-site sugar so the CCI spawn / stop / api-error paths can emit metrics
+    # without touching prometheus_client handles directly. Every helper swallows
+    # its own exceptions: instrumentation must NEVER alter spawn behaviour or
+    # crash the gateway (spec §7.1). These are no-ops on the docker path because
+    # MetricsState is only constructed when KIMI_METRICS_ENABLED — call sites
+    # guard against ``self.metrics is None`` before reaching here.
+
+    def record_spawn(self, *, backend: str, result: str) -> None:
+        """``kimo_sandbox_spawn_total{backend,result}`` +1 (one per spawn attempt)."""
+        with contextlib.suppress(Exception):
+            self.metrics["spawn_total"].labels(backend=backend, result=result).inc()
+
+    def observe_spawn_duration(self, *, backend: str, seconds: float) -> None:
+        """``kimo_sandbox_spawn_duration_seconds{backend}`` observe one spawn."""
+        with contextlib.suppress(Exception):
+            self.metrics["spawn_duration"].labels(backend=backend).observe(seconds)
+
+    def inc_active_sandboxes(self, delta: int = 1) -> None:
+        """``kimo_active_sandboxes`` += delta (spawn success +1 / stop -1)."""
+        with contextlib.suppress(Exception):
+            self.metrics["active_sandboxes"].inc(delta)
+
+    def record_cci_api_error(self, *, operation: str, code: str) -> None:
+        """``kimo_cci_api_error_total{operation,code}`` +1 on a CCI REST error."""
+        with contextlib.suppress(Exception):
+            self.metrics["cci_api_error_total"].labels(operation=operation, code=code).inc()
+
+    def record_agent_load_failure(self, *, reason: str) -> None:
+        """``kimo_agent_load_failure_total{reason}`` +1 when a worker refused to
+        start because its required agent could not be loaded.
+
+        ``reason`` is one of ``subagent_unresolved`` (``SUBAGENT`` was set but no
+        matching yaml on the Pod) or ``agent_required_missing``
+        (``KIMI_REQUIRE_AGENT`` was set but resolution still landed on the
+        default agent). Called from the gateway when it sees a worker exit with
+        ``AGENT_LOAD_FAILURE_EXIT_CODE``."""
+        with contextlib.suppress(Exception):
+            self.metrics["agent_load_failure_total"].labels(reason=reason).inc()
 
 
 def _basic_auth_ok(request: Request, user: str, password: str) -> bool:

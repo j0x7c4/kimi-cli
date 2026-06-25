@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 if TYPE_CHECKING:
+    from kimi_cli.web.metrics import MetricsState
     from kimi_cli.web.spawner.cci_auth import HuaweiSigner
 
 
@@ -49,6 +50,10 @@ class CciRestClient:
         self._base = f"https://{endpoint}"
         self._signer = signer
         self._timeout = timeout
+        # Optional metrics sink (spec §7.2 kimo_cci_api_error_total). Backfilled by
+        # app.py after MetricsState is built (None on docker path / metrics off →
+        # error instrumentation is a silent no-op). NEVER affects request behaviour.
+        self.metrics: MetricsState | None = None
 
     # ── cci/v2 : pods ─────────────────────────────────────────────────────────
 
@@ -113,8 +118,7 @@ class CciRestClient:
             )
         return self._parse(operation, resp)
 
-    @staticmethod
-    def _parse(operation: str, resp: Any) -> dict[str, Any]:
+    def _parse(self, operation: str, resp: Any) -> dict[str, Any]:
         status = resp.status_code
         text = resp.text or ""
         parsed: dict[str, Any]
@@ -130,7 +134,15 @@ class CciRestClient:
             if isinstance(parsed, dict):
                 code = parsed.get("code") or parsed.get("reason")
                 message = parsed.get("message") or text
-            raise CciApiError(operation, status, code, message)
+            err = CciApiError(operation, status, code, message)
+            # spec §7.2: emit kimo_cci_api_error_total{operation,code} at the single
+            # raise point. ``err.operation`` / ``err.code`` are the labelled values
+            # (code falls back to str(status) when 华为 body carries no code/reason).
+            if self.metrics is not None:
+                self.metrics.record_cci_api_error(
+                    operation=err.operation, code=err.code
+                )
+            raise err
         return parsed if isinstance(parsed, dict) else {}
 
 

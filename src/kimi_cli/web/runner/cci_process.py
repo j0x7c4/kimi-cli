@@ -32,17 +32,20 @@ from uuid import UUID, uuid4
 from kimi_cli import logger
 from kimi_cli.memory import resolve_owner_id
 from kimi_cli.utils.subprocess_env import get_clean_env
+from kimi_cli.web.api.sandbox_assets import SANDBOX_ASSETS_PATH
 
 # Reuse the docker runner's env-forwarding + owner/subagent disk resolution so a
 # CCI sandbox sees exactly the same env contract as a docker sandbox.
 from kimi_cli.web.runner.container import (
     _SANDBOX_ENV_VARS,
+    _read_agent_name_from_disk,
     _read_owner_id_from_disk,
-    _read_subagent_from_disk,
 )
 from kimi_cli.web.runner.process import KimiCLIRunner, SessionProcess
+from kimi_cli.web.runner.worker import AGENT_LOAD_FAILURE_EXIT_CODE
 from kimi_cli.web.spawner import SandboxHandle, SandboxSpawner
 from kimi_cli.web.spawner.cci_exec import KimoExecStream
+from kimi_cli.wire.jsonrpc import JSONRPCErrorObject, JSONRPCErrorResponse
 
 
 class CCISessionProcess(SessionProcess):
@@ -105,6 +108,63 @@ class CCISessionProcess(SessionProcess):
     def is_alive(self) -> bool:
         stream = self._exec_stream
         return stream is not None and not stream.at_eof()
+
+    # ── worker-exit hook (override base no-op) ───────────────────────────────
+
+    async def _on_worker_exit(self, returncode: int | None, stderr: bytes) -> None:
+        """Detect the agent-load-failure exit code → record metric + clear error.
+
+        When the Pod worker refuses to start because its required agent couldn't
+        be loaded it exits with ``AGENT_LOAD_FAILURE_EXIT_CODE`` (and best-effort
+        writes a wire error to stdout, which the read loop already broadcasts).
+        Here on the gateway we (1) bump ``kimo_agent_load_failure_total`` so a
+        mis-mounted bundle is visible on the dashboard immediately, and (2)
+        broadcast an extra, explicit client-facing error in case the worker died
+        before it could write its own wire frame. ``reason`` is recovered from the
+        worker's wire error data when present, else defaults to
+        ``agent_required_missing``.
+
+        Best-effort: never raises (runs inside the read loop).
+        """
+        if returncode != AGENT_LOAD_FAILURE_EXIT_CODE:
+            return
+
+        reason = "agent_required_missing"
+        worker_message = ""
+        # The worker stamps {"reason": ...} into its wire error data and the same
+        # human message into stderr; recover both if the channel carried them.
+        with contextlib.suppress(Exception):
+            text = stderr.decode("utf-8", errors="replace")
+            if text and text != "No stderr":
+                worker_message = text
+
+        metrics = getattr(self._spawner, "metrics", None)
+        if metrics is not None:
+            with contextlib.suppress(Exception):
+                metrics.record_agent_load_failure(reason=reason)
+
+        detail = worker_message or (
+            "Sandbox worker refused to start: the required agent could not be "
+            "loaded. Check that the agent name was forwarded (SUBAGENT) and that "
+            "its yaml reached the Pod (~/.kimi/agents/<name>.yaml)."
+        )
+        logger.error(
+            "[CCISessionProcess] worker agent-load failure sid={sid} reason={reason}: {detail}",
+            sid=self.session_id,
+            reason=reason,
+            detail=detail,
+        )
+        with contextlib.suppress(Exception):
+            await self._broadcast(
+                JSONRPCErrorResponse(
+                    id="agent-load-failure",
+                    error=JSONRPCErrorObject(
+                        code=AGENT_LOAD_FAILURE_EXIT_CODE,
+                        message=f"Agent load failed: {detail}",
+                        data={"reason": reason},
+                    ),
+                ).model_dump_json()
+            )
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -202,9 +262,35 @@ class CCISessionProcess(SessionProcess):
         env["KIMI_SESSION_ID"] = str(self.session_id)
         owner_id_raw = _read_owner_id_from_disk(self.session_id)
         env["KIMI_USER_ID"] = resolve_owner_id(owner_id_raw)
-        subagent = _read_subagent_from_disk(self.session_id)
-        if subagent:
-            env["SUBAGENT"] = subagent
+        # CCI worker 起的是 fresh session（Pod 上无 session_config.json），故转发 agent
+        # 名字（subagent 字段 OR agent_spec_path basename），worker 按名解析下载下来的
+        # ~/.kimi/agents/<name>.yaml。docker 走 bind-mount 读 agent_spec_path，不受影响。
+        agent_name = _read_agent_name_from_disk(self.session_id)
+        if agent_name:
+            env["SUBAGENT"] = agent_name
+            # hechun-fork-cci: this session REQUIRES a specific agent (the gateway
+            # forwarded its name), so flip the worker into fail-fast mode — if it
+            # can't resolve the agent it must refuse to start rather than silently
+            # serve the default agent. Docker never injects this (the worker reads
+            # agent_spec_path off the bind-mount), so docker behaviour is unchanged.
+            env["KIMI_REQUIRE_AGENT"] = "1"
+
+        # hechun-fork-cci: CCI Pods can't bind-mount the gateway host, so the
+        # worker fetches static assets (~/.kimi/agents etc.) over HTTP from the
+        # gateway's internal sandbox-assets endpoint on startup. We compute the
+        # download URL + token here (values must be assembled by the gateway, so
+        # this is NOT a host-env passthrough via _SANDBOX_ENV_VARS) and inject
+        # them only when the deploy provides KIMO_GATEWAY_INTERNAL_URL (= the
+        # gateway's VPC-internal base URL). Docker path never injects these, so
+        # its bind-mount stays the only source there and the worker skips the
+        # download entirely. None-safe: unset → vars absent → worker no-ops.
+        internal_url = (host_env.get("KIMO_GATEWAY_INTERNAL_URL") or "").strip()
+        if internal_url:
+            env["KIMO_SANDBOX_ASSETS_URL"] = internal_url.rstrip("/") + SANDBOX_ASSETS_PATH
+            token = host_env.get("KIMI_WEB_SESSION_TOKEN")
+            if token:
+                env["KIMO_SANDBOX_ASSETS_TOKEN"] = token
+
         env.update(self._extra_env)
         return env
 

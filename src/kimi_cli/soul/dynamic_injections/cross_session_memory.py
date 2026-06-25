@@ -89,7 +89,9 @@ def _read_persistent(user_memory_dir) -> Sequence[MemoryEntry]:
     """
     import os as _os
 
-    if _os.environ.get("KIMI_STORAGE_BACKEND", "file").lower() == "postgres":
+    # DB 后端（postgres 或 mysql）：跨会话 memory 从 storage 读（2026-06-25 补 mysql，
+    # 否则 mysql 下走文件 fallback、CCI worker 读不到 DB 里的用户长期记忆）。
+    if _os.environ.get("KIMI_STORAGE_BACKEND", "file").lower() in ("postgres", "mysql"):
         try:
             owner_id = user_memory_dir.parent.name  # users/<owner_id>/memory
         except Exception:

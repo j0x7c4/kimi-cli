@@ -37,6 +37,7 @@ from kimi_cli.web.api import (
     config_router,
     memory_router,
     open_in_router,
+    sandbox_assets_router,
     sessions_router,
     work_dirs_router,
 )
@@ -224,6 +225,13 @@ def create_app(
                     metrics_state.namespace = getattr(
                         spawner, "namespace", metrics_state.namespace
                     )
+                    # Backfill the runtime metrics sink into the spawner (spec §7.2):
+                    # this wires kimo_sandbox_spawn_* / kimo_active_sandboxes (in
+                    # CCISpawner.spawn/stop) and forwards into the REST client so
+                    # kimo_cci_api_error_total is emitted at its raise point. No-op
+                    # for any spawner lacking a ``metrics`` attribute (docker path).
+                    if hasattr(spawner, "metrics"):
+                        spawner.metrics = metrics_state
                 app.state.metrics = metrics_state
                 logger.info("[create_app] metrics on (/metrics mounted)")
             except Exception as _e:  # noqa: BLE001
@@ -307,6 +315,11 @@ def create_app(
     application.include_router(agents_router)
     application.include_router(memory_router)
     application.include_router(capabilities_router)
+    # hechun-fork-cci: internal endpoint that ships static sandbox assets
+    # (~/.kimi/agents etc.) to CCI Pod workers, which cannot bind-mount the
+    # gateway host. The handler verifies the gateway session token itself
+    # (the path is outside /api/ so AuthMiddleware does not gate it).
+    application.include_router(sandbox_assets_router)
     if not restrict_sensitive_apis:
         application.include_router(open_in_router)
 

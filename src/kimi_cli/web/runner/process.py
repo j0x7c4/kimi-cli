@@ -338,6 +338,18 @@ class SessionProcess:
         process.stdin.write(data)
         await process.stdin.drain()
 
+    async def _on_worker_exit(self, returncode: int | None, stderr: bytes) -> None:
+        """Hook fired when the worker exits unexpectedly (before the generic
+        error broadcast in :meth:`_read_loop`).
+
+        No-op in the base class. Backends override it to react to specific exit
+        codes — e.g. :class:`~kimi_cli.web.runner.cci_process.CCISessionProcess`
+        maps ``AGENT_LOAD_FAILURE_EXIT_CODE`` onto the
+        ``kimo_agent_load_failure_total`` metric and a clearer client message
+        (hechun-fork-cci). Must never raise (it runs inside the read loop).
+        """
+        return None
+
     async def _read_loop(self) -> None:
         """Read messages from worker stdout and broadcast to WebSockets.
 
@@ -360,6 +372,11 @@ class SessionProcess:
                         # is_busy is already False when the frontend reacts
                         # to the error and sends a new prompt.
                         self._in_flight_prompt_ids.clear()
+                        # hechun-fork-cci: let backends react to specific worker
+                        # exit codes (e.g. CCI maps AGENT_LOAD_FAILURE_EXIT_CODE
+                        # → metric + clearer message). No-op in the base class, so
+                        # docker/local behaviour is unchanged.
+                        await self._on_worker_exit(returncode, stderr)
                         await self._broadcast(
                             JSONRPCErrorResponse(
                                 id=str(uuid4()),

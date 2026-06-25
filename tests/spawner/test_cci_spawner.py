@@ -72,8 +72,11 @@ class TestPodSpec:
         assert pod["metadata"]["name"] == f"kimo-sandbox-{sid}"
         assert pod["metadata"]["labels"]["app"] == "kimo-sandbox"
         assert pod["metadata"]["labels"]["session_id"] == str(sid)
-        # no yangtse.io/* annotations
-        assert "annotations" not in pod["metadata"]
+        # no yangtse.io/* annotations (network via namespace default Network);
+        # image-snapshot annotation IS present by default (cold-start accel).
+        _ann = pod["metadata"].get("annotations", {})
+        assert _ann.get("cci.io/image-snapshot-create-if-not-present") == "true"
+        assert not any(k.startswith("yangtse.io/") for k in _ann)
 
         c = pod["spec"]["containers"][0]
         assert c["stdin"] is True
@@ -182,6 +185,132 @@ class TestStopHealthcheck:
         client.read_raises = CciApiError("read_pod", 404, "NotFound", "gone")
         sp = _make_spawner(client)
         assert await sp.healthcheck(SandboxHandle(backend="cci", handle_id="x")) is False
+
+
+def _metric_value(state, name: str, labels: dict[str, str] | None = None) -> float:
+    """Read a single sample value out of a MetricsState registry (0.0 if absent)."""
+    val = state.registry.get_sample_value(name, labels or {})
+    return val if val is not None else 0.0
+
+
+class TestSpawnMetrics:
+    """spec §7.2 instrumentation: spawn_total / spawn_duration / active_sandboxes /
+    cci_api_error_total are emitted on the real CCISpawner paths.
+    """
+
+    def _spawner_with_metrics(self, client: _FakeClient):
+        prometheus = pytest.importorskip("prometheus_client")  # noqa: F841
+        from kimi_cli.web.metrics import MetricsState
+
+        sp = _make_spawner(client)
+        state = MetricsState()
+        sp.metrics = state  # also wires client.metrics via the property
+        return sp, state
+
+    async def test_spawn_success_emits_total_duration_and_active(self):
+        client = _FakeClient()
+        client.read_responses = [{"status": {"phase": "Running", "podIP": "10.0.0.5"}}]
+        sp, state = self._spawner_with_metrics(client)
+
+        await sp.spawn(uuid4(), "hechun-1", {})
+
+        assert _metric_value(
+            state, "kimo_sandbox_spawn_total", {"backend": "cci", "result": "success"}
+        ) == 1.0
+        assert _metric_value(state, "kimo_active_sandboxes") == 1.0
+        # duration histogram observed exactly once on the success path.
+        assert _metric_value(
+            state, "kimo_sandbox_spawn_duration_seconds_count", {"backend": "cci"}
+        ) == 1.0
+
+    async def test_spawn_timeout_emits_result_timeout(self):
+        client = _FakeClient()
+        client.read_responses = [{"status": {"phase": "Pending"}}] * 100
+        sp, state = self._spawner_with_metrics(client)
+
+        with pytest.raises(SpawnTimeout):
+            await sp.spawn(uuid4(), "hechun-1", {})
+
+        assert _metric_value(
+            state, "kimo_sandbox_spawn_total", {"backend": "cci", "result": "timeout"}
+        ) == 1.0
+        # no success, no active bump, no duration observation on timeout.
+        assert _metric_value(
+            state, "kimo_sandbox_spawn_total", {"backend": "cci", "result": "success"}
+        ) == 0.0
+        assert _metric_value(state, "kimo_active_sandboxes") == 0.0
+        assert _metric_value(
+            state, "kimo_sandbox_spawn_duration_seconds_count", {"backend": "cci"}
+        ) == 0.0
+
+    async def test_spawn_other_error_emits_result_failure_and_api_error(self):
+        client = _FakeClient()
+
+        async def create_500(ns, pod):
+            raise CciApiError("create_pod", 500, "InternalError", "boom")
+
+        client.create_pod = create_500  # type: ignore[assignment]
+        sp, state = self._spawner_with_metrics(client)
+
+        with pytest.raises(CciApiError):
+            await sp.spawn(uuid4(), "hechun-1", {})
+
+        # spawn classifies any non-timeout exception as result=failure.
+        assert _metric_value(
+            state, "kimo_sandbox_spawn_total", {"backend": "cci", "result": "failure"}
+        ) == 1.0
+        assert _metric_value(state, "kimo_active_sandboxes") == 0.0
+        # NOTE: cci_api_error_total is emitted inside CciRestClient._parse (the
+        # real raise point), not here — this fake raises the error directly,
+        # bypassing _parse. The api-error counter is covered in the client tests.
+
+    async def test_stop_decrements_active(self):
+        client = _FakeClient()
+        client.read_responses = [{"status": {"phase": "Running", "podIP": "10.0.0.5"}}]
+        sp, state = self._spawner_with_metrics(client)
+
+        handle = await sp.spawn(uuid4(), "hechun-1", {})
+        assert _metric_value(state, "kimo_active_sandboxes") == 1.0
+        await sp.stop(handle)
+        assert _metric_value(state, "kimo_active_sandboxes") == 0.0
+
+    async def test_stop_404_still_decrements_active(self):
+        client = _FakeClient()
+        client.read_responses = [{"status": {"phase": "Running", "podIP": "10.0.0.5"}}]
+        sp, state = self._spawner_with_metrics(client)
+        handle = await sp.spawn(uuid4(), "hechun-1", {})
+
+        async def delete_404(ns, name, grace=10):
+            raise CciApiError("delete_pod", 404, "NotFound", "gone")
+
+        client.delete_pod = delete_404  # type: ignore[assignment]
+        await sp.stop(handle)  # no raise
+        assert _metric_value(state, "kimo_active_sandboxes") == 0.0
+
+    async def test_stop_non_404_does_not_decrement(self):
+        client = _FakeClient()
+        client.read_responses = [{"status": {"phase": "Running", "podIP": "10.0.0.5"}}]
+        sp, state = self._spawner_with_metrics(client)
+        handle = await sp.spawn(uuid4(), "hechun-1", {})
+
+        async def delete_500(ns, name, grace=10):
+            raise CciApiError("delete_pod", 500, "Err", "boom")
+
+        client.delete_pod = delete_500  # type: ignore[assignment]
+        with pytest.raises(CciApiError):
+            await sp.stop(handle)
+        # delete failed → Pod may still be Running → gauge stays at 1.
+        assert _metric_value(state, "kimo_active_sandboxes") == 1.0
+
+    async def test_metrics_none_does_not_crash(self):
+        # No metrics wired (docker path / KIMI_METRICS_ENABLED off): spawn/stop
+        # must behave exactly as before and never touch a None handle.
+        client = _FakeClient()
+        client.read_responses = [{"status": {"phase": "Running", "podIP": "10.0.0.5"}}]
+        sp = _make_spawner(client)
+        assert sp.metrics is None
+        handle = await sp.spawn(uuid4(), "hechun-1", {})
+        await sp.stop(handle)  # no raise
 
 
 class TestFromEnv:

@@ -97,7 +97,7 @@ def _make_proc(stream: FakeExecStream, monkeypatch: pytest.MonkeyPatch) -> tuple
     monkeypatch.setattr(cci_mod, "KimoExecStream", FakeExecStream)
     # Avoid disk/env IO during _build_sandbox_env.
     monkeypatch.setattr(cci_mod, "_read_owner_id_from_disk", lambda sid: "hechun-1")
-    monkeypatch.setattr(cci_mod, "_read_subagent_from_disk", lambda sid: None)
+    monkeypatch.setattr(cci_mod, "_read_agent_name_from_disk", lambda sid: None)
     monkeypatch.setattr(cci_mod, "get_clean_env", lambda: {})
 
     spawner = FakeSpawner(stream)
@@ -251,3 +251,131 @@ class TestCCIRunner:
         # idempotent
         assert (await runner.get_or_create_session(sid)) is proc
         assert runner.get_session(sid) is proc
+
+
+class TestRequireAgentEnvInjection:
+    """hechun-fork-cci: when the gateway forwards an agent name (SUBAGENT) it must
+    also flip KIMI_REQUIRE_AGENT=1 so the worker fails fast instead of silently
+    falling back to the default agent."""
+
+    def _build_env(self, monkeypatch: pytest.MonkeyPatch, *, agent_name):
+        import kimi_cli.web.runner.cci_process as cci_mod
+
+        monkeypatch.setattr(cci_mod, "_read_owner_id_from_disk", lambda sid: "hechun-1")
+        monkeypatch.setattr(cci_mod, "_read_agent_name_from_disk", lambda sid: agent_name)
+        monkeypatch.setattr(cci_mod, "get_clean_env", lambda: {})
+        spawner = FakeSpawner(FakeExecStream(stdout_lines=[]))
+        proc = CCISessionProcess(uuid4(), spawner=spawner)
+        return proc._build_sandbox_env()
+
+    def test_require_agent_injected_when_subagent_set(self, monkeypatch: pytest.MonkeyPatch):
+        env = self._build_env(monkeypatch, agent_name="diabetes-expert")
+        assert env["SUBAGENT"] == "diabetes-expert"
+        assert env["KIMI_REQUIRE_AGENT"] == "1"
+
+    def test_require_agent_absent_when_no_subagent(self, monkeypatch: pytest.MonkeyPatch):
+        env = self._build_env(monkeypatch, agent_name=None)
+        assert "SUBAGENT" not in env
+        assert "KIMI_REQUIRE_AGENT" not in env
+
+
+class _MetricsSpawner(FakeSpawner):
+    """FakeSpawner that also carries a metrics sink (mirrors CCISpawner.metrics)."""
+
+    def __init__(self, stream: FakeExecStream):
+        super().__init__(stream)
+
+        class _Metrics:
+            def __init__(self):
+                self.agent_load_failures: list[str] = []
+
+            def record_agent_load_failure(self, *, reason: str) -> None:
+                self.agent_load_failures.append(reason)
+
+        self.metrics = _Metrics()
+
+
+class TestAgentLoadFailureExitCode:
+    """Gateway recognises AGENT_LOAD_FAILURE_EXIT_CODE on worker EOF → records
+    the metric + broadcasts a clear client-facing error."""
+
+    async def test_exit_code_42_records_metric_and_broadcasts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        from kimi_cli.web.runner.worker import AGENT_LOAD_FAILURE_EXIT_CODE
+
+        # Worker died with the agent-load failure exit code; stderr carries the
+        # human message (no wire stdout line in this scenario).
+        stream = FakeExecStream(
+            stdout_lines=[],
+            error=b"required agent could not be loaded",
+            returncode=AGENT_LOAD_FAILURE_EXIT_CODE,
+        )
+        import kimi_cli.web.runner.cci_process as cci_mod
+
+        monkeypatch.setattr(cci_mod, "KimoExecStream", FakeExecStream)
+        monkeypatch.setattr(cci_mod, "_read_owner_id_from_disk", lambda sid: "hechun-1")
+        monkeypatch.setattr(cci_mod, "_read_agent_name_from_disk", lambda sid: None)
+        monkeypatch.setattr(cci_mod, "get_clean_env", lambda: {})
+
+        spawner = _MetricsSpawner(stream)
+        proc = CCISessionProcess(uuid4(), spawner=spawner)
+
+        broadcasts: list[str] = []
+
+        async def capture(msg: str) -> None:
+            broadcasts.append(msg)
+
+        monkeypatch.setattr(proc, "_broadcast", capture)
+        await proc.start()
+        proc._expecting_exit = False
+        await proc._read_task
+
+        # Metric recorded exactly once with the agent_required_missing reason.
+        assert spawner.metrics.agent_load_failures == ["agent_required_missing"]
+
+        # A clear, client-visible error was broadcast carrying code 42 + reason.
+        agent_errors = []
+        for b in broadcasts:
+            try:
+                parsed = json.loads(b)
+            except ValueError:
+                continue
+            err = parsed.get("error") if isinstance(parsed, dict) else None
+            if isinstance(err, dict) and err.get("code") == AGENT_LOAD_FAILURE_EXIT_CODE:
+                agent_errors.append(parsed)
+        assert agent_errors, "expected an agent-load-failure error broadcast"
+        # The dedicated _on_worker_exit broadcast stamps the reason + clear text.
+        explicit = [
+            e
+            for e in agent_errors
+            if isinstance(e["error"].get("data"), dict)
+            and e["error"]["data"].get("reason") == "agent_required_missing"
+        ]
+        assert explicit, "expected the explicit reason-stamped agent-load error"
+        assert "Agent load failed" in explicit[-1]["error"]["message"]
+
+    async def test_non_42_exit_does_not_record_agent_metric(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # A generic crash (different exit code) must NOT bump the agent metric.
+        stream = FakeExecStream(stdout_lines=[], error=b"boom", returncode=137)
+        import kimi_cli.web.runner.cci_process as cci_mod
+
+        monkeypatch.setattr(cci_mod, "KimoExecStream", FakeExecStream)
+        monkeypatch.setattr(cci_mod, "_read_owner_id_from_disk", lambda sid: "hechun-1")
+        monkeypatch.setattr(cci_mod, "_read_agent_name_from_disk", lambda sid: None)
+        monkeypatch.setattr(cci_mod, "get_clean_env", lambda: {})
+
+        spawner = _MetricsSpawner(stream)
+        proc = CCISessionProcess(uuid4(), spawner=spawner)
+
+        async def noop(_m) -> None:
+            return None
+
+        monkeypatch.setattr(proc, "_broadcast", noop)
+        await proc.start()
+        proc._expecting_exit = False
+        await proc._read_task
+
+        assert spawner.metrics.agent_load_failures == []

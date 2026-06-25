@@ -136,3 +136,56 @@ class TestErrorHandling:
         with pytest.raises(CciApiError) as ei:
             await client.read_pod("ns", "p")
         assert ei.value.status == 500
+
+
+class TestApiErrorMetric:
+    """spec §7.2: kimo_cci_api_error_total{operation,code} is emitted at the
+    single raise point inside _parse when a metrics sink is wired."""
+
+    async def test_error_emits_counter_with_operation_and_code(
+        self, client: CciRestClient
+    ):
+        pytest.importorskip("prometheus_client")
+        from kimi_cli.web.metrics import MetricsState
+
+        state = MetricsState()
+        client.metrics = state
+        _FakeAsyncClient.response = _FakeResponse(
+            409, {"code": "Conflict", "message": "already exists"}
+        )
+        with pytest.raises(CciApiError):
+            await client.create_namespace({"kind": "Namespace"})
+
+        assert (
+            state.registry.get_sample_value(
+                "kimo_cci_api_error_total",
+                {"operation": "create_namespace", "code": "Conflict"},
+            )
+            == 1.0
+        )
+
+    async def test_error_code_falls_back_to_status(self, client: CciRestClient):
+        # 华为 body without code/reason → CciApiError.code == str(status).
+        pytest.importorskip("prometheus_client")
+        from kimi_cli.web.metrics import MetricsState
+
+        state = MetricsState()
+        client.metrics = state
+        _FakeAsyncClient.response = _FakeResponse(500, text="boom")
+        with pytest.raises(CciApiError):
+            await client.read_pod("ns", "p")
+
+        assert (
+            state.registry.get_sample_value(
+                "kimo_cci_api_error_total", {"operation": "read_pod", "code": "500"}
+            )
+            == 1.0
+        )
+
+    async def test_no_metrics_sink_does_not_crash(self, client: CciRestClient):
+        # client.metrics defaults to None (docker path / metrics off): error still
+        # raises normally, no instrumentation attempted.
+        assert client.metrics is None
+        _FakeAsyncClient.response = _FakeResponse(500, text="boom")
+        with pytest.raises(CciApiError):
+            await client.read_pod("ns", "p")
