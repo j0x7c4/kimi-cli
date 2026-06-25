@@ -40,7 +40,9 @@ class TestResourceSpecs:
         assert net["kind"] == "Network"
         assert net["metadata"] == {"name": "default-network", "namespace": "hechun-prod"}
         spec = net["spec"]
-        assert spec["networkType"] == "underlay-neutron"
+        # underscore, not hyphen: admission webhook validate.yangtse.cni rejects
+        # "underlay-neutron" (live-verified 2026-06-24).
+        assert spec["networkType"] == "underlay_neutron"
         assert spec["subnets"] == [{"subnetID": "subnet-123"}]
         assert spec["securityGroups"] == ["sg-456"]
         assert spec["ipFamilies"] == ["IPv4"]

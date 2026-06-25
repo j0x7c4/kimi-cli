@@ -127,7 +127,11 @@ class TestKimoExecStreamApi:
         assert out == b"line1"
         out2 = await stream.recv()
         assert out2 == b"line2"
-        # queue drained → empty bytes, not None
+        # EOF is decided by is_open(), NOT by an empty read — an open-but-drained
+        # stream blocks for the next frame (live-verified 2026-06-25: real
+        # WSClient.read_stdout returns "" for both "no stdout this frame" and
+        # "closed"). So close the fake to get the b"" EOF.
+        stream._fake_ws._open_after_drain = False  # type: ignore[attr-defined]
         assert await stream.recv() == b""
 
     async def test_sendall_before_connect_raises(self):

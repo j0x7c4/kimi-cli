@@ -54,7 +54,11 @@ class CCISpawner:
         namespace: str,
         region: str,
         image: str,
-        image_pull_secret: str | None = "swr-pull-secret",
+        # CCI 2.0 auto-manages a namespace-scoped ``imagepull-secret`` (rolling
+        # 24h token) for same-account SWR pulls — live-verified the blessed path
+        # (2026-06-25). Referencing a non-existent ``swr-pull-secret`` makes
+        # containerd fall back to anonymous → 401 on private repos.
+        image_pull_secret: str | None = "imagepull-secret",
     ) -> None:
         self.client = client
         self.token_provider = token_provider

@@ -39,6 +39,14 @@ RESIZE_CHANNEL = 4
 
 WS_SUBPROTOCOL = "channel.k8s.io"
 
+# Subprotocol CCI 2.0 actually negotiates for exec (live-verified 2026-06-25:
+# bare "channel.k8s.io" and v5 both fail; v4 → 101). channel byte framing is the
+# same v4 protocol kubernetes WSClient demuxes.
+EXEC_SUBPROTOCOL = "v4.channel.k8s.io"
+
+# WS handshake timeout (s); cleared to None after connect for streaming reads.
+_HANDSHAKE_TIMEOUT_S = 20
+
 # Worker command launched inside the sandbox via exec. The sandbox image's
 # entrypoint normally runs ``/start-sandbox.sh``; for warm-pool BIND/attach we
 # exec the worker bootstrap directly (spec §5 stdin:true + 上游 §3.4 BIND).
@@ -110,30 +118,57 @@ class KimoExecStream:
     def _open_ws(self, url: str, token: str) -> object:
         """Open the channel.k8s.io WebSocket (overridable in tests).
 
-        Uses ``kubernetes.stream.ws_client.WSClient`` for proven channel framing.
-        Imported lazily so the docker path needs neither ``kubernetes`` nor
-        ``websocket-client``.
+        Reuses ``kubernetes.stream.ws_client.WSClient`` for its proven channel
+        (de)muxing, but builds the underlying socket ourselves — the kubernetes
+        helper ``create_websocket`` only forwards an ``authorization`` header and
+        silently drops everything else, so the CCI ``X-Auth-Token`` never reaches
+        the server and the handshake 401s behind CloudWAF.
 
-        M0 NOTE (spec §9-8, ★最大风险点): ``WSClient`` derives TLS / proxy options
-        from a ``kubernetes.client.Configuration``. Since CCI exec auth is the
-        ``X-Auth-Token`` header (not a kubeconfig), we build a bare Configuration
-        with ``host`` set and verify_ssl on. The end-to-end handshake (101 +
-        channel frames) MUST be validated against a real Pod during M0 — it can't
-        be exercised by curl/postman (官方明示). Tests stub this method.
+        M0 LIVE-VERIFIED recipe (spec §9-8, ★最大风险点 — 真机钉死, 2026-06-25):
+        - header ``X-Auth-Token: <iam token>`` passed straight to websocket-client
+          (NOT through ``kubernetes...create_websocket``).
+        - subprotocol ``v4.channel.k8s.io`` (CCI negotiates v4, not bare
+          ``channel.k8s.io`` nor v5). → ``101 Switching Protocols``.
+        The socket is then wrapped in a ``WSClient`` shell (same attrs its
+        ``__init__`` sets, minus the broken ``create_websocket`` call) so all the
+        downstream channel demux (read_stdout/read_stderr/read_channel/...) is
+        unchanged. Tests stub this whole method.
         """
-        from kubernetes.client import Configuration  # noqa: PLC0415
+        import ssl  # noqa: PLC0415
+        from io import StringIO  # noqa: PLC0415
+
+        import certifi  # noqa: PLC0415
+        import websocket  # noqa: PLC0415 — websocket-client
         from kubernetes.stream.ws_client import WSClient  # noqa: PLC0415
 
-        configuration = Configuration()
-        configuration.host = url
-        configuration.verify_ssl = True
-        headers = [f"X-Auth-Token: {token}"]
-        return WSClient(
-            configuration=configuration,
-            url=url,
-            headers=headers,
-            capture_all=True,
+        sslopt = {"cert_reqs": ssl.CERT_REQUIRED, "ca_certs": certifi.where()}
+        sock = websocket.create_connection(
+            url,
+            header=[f"X-Auth-Token: {token}"],
+            subprotocols=[EXEC_SUBPROTOCOL],
+            sslopt=sslopt,
+            skip_utf8_validation=True,
+            timeout=_HANDSHAKE_TIMEOUT_S,
         )
+        # Streaming reads must block (WSClient.update() gates readability via
+        # select); clear the handshake timeout so idle exec streams don't trip
+        # WebSocketTimeoutException.
+        sock.settimeout(None)
+
+        # Build a WSClient around the pre-connected socket — replicate the bits
+        # WSClient.__init__(capture_all=True) sets, skipping its create_websocket.
+        client = WSClient.__new__(WSClient)
+        client._connected = False
+        client._channels = {}
+        client._closed_channels = set()
+        client.subprotocol = getattr(sock, "subprotocol", None)
+        client.binary = False
+        client.newline = "\n"
+        client._all = StringIO()
+        client.sock = sock
+        client._connected = True
+        client._returncode = None
+        return client
 
     async def sendall(self, data: bytes) -> None:
         """Write ``data`` to the sandbox worker's stdin (channel 0)."""
@@ -147,10 +182,17 @@ class KimoExecStream:
 
         Non-stdout channels are siphoned into internal buffers (stderr/error)
         rather than returned, so the caller's JSON-RPC framing on stdout is
-        never corrupted. Returns ``b""`` when the stream is closed (EOF).
+        never corrupted. Blocks until stdout data arrives; returns ``b""`` only
+        when the stream is closed (EOF).
         """
-        chunk = await self._recv_stdout_chunk()
-        return chunk if chunk is not None else b""
+        while True:
+            chunk = await self._recv_stdout_chunk()
+            if chunk is None:
+                return b""  # real EOF
+            if chunk:
+                return chunk
+            # transient: the frame just read carried no stdout (stderr/error/
+            # keepalive) — keep polling rather than mistaking it for EOF.
 
     async def readline(self) -> bytes:
         """Return exactly one newline-terminated stdout line (StreamReader parity).
@@ -164,7 +206,7 @@ class KimoExecStream:
             raise RuntimeError("KimoExecStream.readline before connect")
         while b"\n" not in self._stdout_buf:
             chunk = await self._recv_stdout_chunk()
-            if chunk is None or chunk == b"":
+            if chunk is None:
                 # Stream closed: flush any trailing partial line, then signal EOF.
                 self._eof = True
                 if self._stdout_buf:
@@ -172,6 +214,10 @@ class KimoExecStream:
                     self._stdout_buf.clear()
                     return line
                 return b""
+            if not chunk:
+                # Transient empty: the frame just read was on a non-stdout
+                # channel; keep polling (update() blocked one frame, no spin).
+                continue
             self._stdout_buf.extend(chunk)
         idx = self._stdout_buf.index(b"\n")
         line = bytes(self._stdout_buf[: idx + 1])
@@ -179,17 +225,29 @@ class KimoExecStream:
         return line
 
     async def _recv_stdout_chunk(self) -> bytes | None:
-        """Read one channel-1 chunk; ``None`` when the WebSocket is closed (EOF)."""
+        """Read one channel-1 chunk (tri-state, live-verified 2026-06-25).
+
+        - ``bytes`` (non-empty) — stdout payload.
+        - ``b""``             — the frame just read carried no stdout (it was on
+                                the stderr/error channel, or empty); the socket
+                                is still open, so the caller must keep polling.
+        - ``None``            — EOF: the socket is closed.
+
+        ``WSClient.read_stdout(timeout=None)`` (binary=False) returns ``""`` for
+        BOTH "no stdout this frame" and "closed" — so emptiness alone is NOT EOF.
+        EOF is decided solely by ``is_open()``. Conflating the two made every
+        exec read return zero output (the first frame races ahead of the
+        command's stdout). ``update(timeout=None)`` blocks one frame per call, so
+        re-polling on ``b""`` is not a busy-spin.
+        """
         if self._ws is None:
             raise RuntimeError("KimoExecStream.recv before connect")
         out = self._ws.read_stdout(timeout=None)
-        if out is None:
-            # WSClient returns None both for "nothing yet" and "closed"; treat a
-            # closed socket as EOF so the read loop can exit deterministically.
-            if not self._is_ws_open():
-                return None
-            return b""
-        return out.encode("utf-8") if isinstance(out, str) else bytes(out)
+        if out:
+            return out.encode("utf-8") if isinstance(out, str) else bytes(out)
+        if not self._is_ws_open():
+            return None
+        return b""
 
     def at_eof(self) -> bool:
         """Whether the stdout stream has reached EOF (worker exited)."""

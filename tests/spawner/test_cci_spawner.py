@@ -83,7 +83,9 @@ class TestPodSpec:
         assert c["env"] == [{"name": "KIMI_API_KEY", "value": "k"}]
         assert pod["spec"]["restartPolicy"] == "Never"
         assert pod["spec"]["terminationGracePeriodSeconds"] == 10
-        assert pod["spec"]["imagePullSecrets"] == [{"name": "swr-pull-secret"}]
+        # CCI auto-managed same-account pull secret (live-verified 2026-06-25;
+        # swr-pull-secret would 401 — wrong name → anonymous pull).
+        assert pod["spec"]["imagePullSecrets"] == [{"name": "imagepull-secret"}]
 
     def test_warm_mode_uses_warm_label(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("KIMI_WARM_MODE", "warm")
