@@ -25,6 +25,7 @@ namely ``sendall(bytes)`` (writes to stdin / channel 0) and ``recv(n) -> bytes``
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -242,7 +243,11 @@ class KimoExecStream:
         """
         if self._ws is None:
             raise RuntimeError("KimoExecStream.recv before connect")
-        out = self._ws.read_stdout(timeout=None)
+        # ★ 关键：WSClient.read_stdout(timeout=None) 是同步阻塞调用（poll.poll(None)）。
+        # 直接在 async 读循环里调会**冻结整个 asyncio 事件循环** —— worker idle 时永久阻塞，
+        # gateway 收不到 client prompt、干不了任何事（2026-06-25 整链实测：事件循环卡死）。
+        # offload 到线程：阻塞发生在线程里，事件循环空出来处理 receive loop / 写 stdin 等。
+        out = await asyncio.to_thread(self._ws.read_stdout, None)
         if out:
             return out.encode("utf-8") if isinstance(out, str) else bytes(out)
         if not self._is_ws_open():
