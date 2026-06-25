@@ -30,7 +30,10 @@ from kimi_cli.web.spawner.cci_client import CciRestClient
 from kimi_cli.web.spawner.cci_exec import KimoExecStream
 
 # Spawn poll backoff (spec §6): 2/4/8s, cap 8s, total timeout 60s.
-_SPAWN_TIMEOUT_S = 60
+# 默认 180s：CCI 冷启动拉 4.1GB sandbox 镜像实测 ~70s（>旧 60s → 整链 spawn 超时）。
+# 可经 env KIMI_CCI_SPAWN_TIMEOUT 调（M1 ImageCache 预热后镜像秒拉，可调回小值）。
+# 注：_wait_running 一旦 Running 立即返回，不会傻等满 timeout。
+_SPAWN_TIMEOUT_S = int(os.environ.get("KIMI_CCI_SPAWN_TIMEOUT") or "180")
 _BACKOFF_START_S = 2
 _BACKOFF_CAP_S = 8
 
@@ -123,7 +126,18 @@ class CCISpawner:
         pod = self._build_pod_spec(sid, owner_id, env)
         resp = await self.client.create_pod(self.namespace, pod)
         name = resp.get("metadata", {}).get("name") or pod["metadata"]["name"]
-        pod_ip = await self._wait_running(name, timeout=_SPAWN_TIMEOUT_S)
+        try:
+            pod_ip = await self._wait_running(name, timeout=_SPAWN_TIMEOUT_S)
+        except BaseException:
+            # 超时/取消即删 Pod：keepalive 主进程(sleep infinity)不会自退，否则泄漏成
+            # 永久 Running → 持续计费（2026-06-25 实测：超时的孤儿 Pod 一直跑）。
+            import contextlib  # noqa: PLC0415
+
+            from kimi_cli.web.spawner.cci_client import CciApiError  # noqa: PLC0415
+
+            with contextlib.suppress(CciApiError):
+                await self.client.delete_pod(self.namespace, name, grace=0)
+            raise
         return SandboxHandle(
             backend="cci",
             handle_id=name,
