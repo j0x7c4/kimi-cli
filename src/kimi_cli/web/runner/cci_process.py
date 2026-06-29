@@ -111,21 +111,81 @@ class CCISessionProcess(SessionProcess):
 
     # ── worker-exit hook (override base no-op) ───────────────────────────────
 
-    async def _on_worker_exit(self, returncode: int | None, stderr: bytes) -> None:
-        """Detect the agent-load-failure exit code → record metric + clear error.
+    async def _release_pod_on_exit(self, *, reason: str) -> None:
+        """Delete the Pod + close the exec stream after the worker has exited.
 
-        When the Pod worker refuses to start because its required agent couldn't
-        be loaded it exits with ``AGENT_LOAD_FAILURE_EXIT_CODE`` (and best-effort
-        writes a wire error to stdout, which the read loop already broadcasts).
-        Here on the gateway we (1) bump ``kimo_agent_load_failure_total`` so a
-        mis-mounted bundle is visible on the dashboard immediately, and (2)
-        broadcast an extra, explicit client-facing error in case the worker died
-        before it could write its own wire frame. ``reason`` is recovered from the
-        worker's wire error data when present, else defaults to
-        ``agent_required_missing``.
+        hechun-fork-cci 主修复（worker 意外退出即删 Pod）. Called from inside the
+        read loop (``_on_worker_exit``) once the worker is confirmed dead. A dead
+        worker leaves the keepalive Pod (``sleep infinity`` 主进程 + 容器里常驻的
+        Xvfb/Jupyter 等) Running forever → 永久计费泄漏. Before this, NO recovery
+        path deleted a Pod when the worker died via ``process_exit`` /
+        ``read_loop_error`` (session went ``error``) — outside the四类启动/sweeper/
+        超时/撞名兜底. So reclaim it immediately.
+
+        Crucially this does NOT call ``stop_worker()``: that cancels + awaits
+        ``self._read_task``, but we ARE running inside that very task → it would
+        cancel itself. Instead we delete the Pod directly via ``spawner.stop`` and
+        drop the handle/stream in place; the read loop then finishes naturally and
+        the periodic sweeper (web/app.py) is a further backstop if this is missed.
 
         Best-effort: never raises (runs inside the read loop).
         """
+        # Mark the worker gone so is_alive() flips False and the sweeper / a later
+        # stop_worker() won't try to re-delete or re-read a dead stream.
+        self._expecting_exit = True
+
+        handle = self._handle
+        self._handle = None
+        stream = self._exec_stream
+        self._exec_stream = None
+
+        if stream is not None:
+            with contextlib.suppress(Exception):
+                await stream.close()
+
+        if handle is not None:
+            try:
+                await self._spawner.stop(handle)
+                logger.info(
+                    "[CCISessionProcess] worker exited → deleted Pod {pod} sid={sid} ({reason})",
+                    pod=handle.handle_id,
+                    sid=self.session_id,
+                    reason=reason,
+                )
+            except Exception as e:  # noqa: BLE001 — delete failure must not wedge the loop
+                logger.warning(
+                    "[CCISessionProcess] worker-exit Pod delete failed sid={sid} pod={pod}: {err}",
+                    sid=self.session_id,
+                    pod=handle.handle_id,
+                    err=e,
+                )
+
+    async def _on_worker_exit(self, returncode: int | None, stderr: bytes) -> None:
+        """Worker died unexpectedly → delete its now-worthless Pod, then (for the
+        agent-load-failure exit code) record the metric + broadcast a clear error.
+
+        hechun-fork-cci. Two responsibilities:
+
+        1. **【主修复 + _on_worker_exit 兜底】 always release the Pod.** A dead worker
+           (any exit code, or a read-loop error) leaves the keepalive Pod Running
+           forever — the leak口子 the原四类兜底 missed. We delete it here for EVERY
+           exit code, not just ``AGENT_LOAD_FAILURE_EXIT_CODE`` (previously this hook
+           special-cased that one code and no-op'd everything else →普通退出码 leaked).
+
+        2. For ``AGENT_LOAD_FAILURE_EXIT_CODE`` specifically: bump
+           ``kimo_agent_load_failure_total`` so a mis-mounted bundle is visible on the
+           dashboard immediately, and broadcast an extra, explicit client-facing error
+           in case the worker died before it could write its own wire frame. ``reason``
+           is recovered from the worker's wire error data when present, else defaults
+           to ``agent_required_missing``.
+
+        Best-effort: never raises (runs inside the read loop).
+        """
+        # (1) 主修复：worker 死了 Pod 无价值 → 立即回收（所有退出码，含 read-loop error）。
+        with contextlib.suppress(Exception):
+            await self._release_pod_on_exit(reason=f"process_exit code={returncode}")
+
+        # (2) Agent-load-failure 专属处理（仅该退出码）。
         if returncode != AGENT_LOAD_FAILURE_EXIT_CODE:
             return
 

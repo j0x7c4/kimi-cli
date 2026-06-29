@@ -207,7 +207,7 @@ class TestSpawnMetrics:
         sp.metrics = state  # also wires client.metrics via the property
         return sp, state
 
-    async def test_spawn_success_emits_total_duration_and_active(self):
+    async def test_spawn_success_emits_total_and_duration(self):
         client = _FakeClient()
         client.read_responses = [{"status": {"phase": "Running", "podIP": "10.0.0.5"}}]
         sp, state = self._spawner_with_metrics(client)
@@ -217,7 +217,11 @@ class TestSpawnMetrics:
         assert _metric_value(
             state, "kimo_sandbox_spawn_total", {"backend": "cci", "result": "success"}
         ) == 1.0
-        assert _metric_value(state, "kimo_active_sandboxes") == 1.0
+        # hechun-fork-cci: spawn no longer bumps the active gauge via inc — the
+        # gauge is derived from list_pods at scrape time (refresh_active_sandboxes),
+        # so spawn leaves it untouched (still 0 here; a scrape would set the real
+        # count). The list_pods derivation is covered in tests/web/test_metrics.py.
+        assert _metric_value(state, "kimo_active_sandboxes") == 0.0
         # duration histogram observed exactly once on the success path.
         assert _metric_value(
             state, "kimo_sandbox_spawn_duration_seconds_count", {"backend": "cci"}
@@ -264,17 +268,23 @@ class TestSpawnMetrics:
         # real raise point), not here — this fake raises the error directly,
         # bypassing _parse. The api-error counter is covered in the client tests.
 
-    async def test_stop_decrements_active(self):
+    async def test_stop_does_not_touch_gauge(self):
+        # hechun-fork-cci: stop no longer dec's kimo_active_sandboxes — the gauge is
+        # derived from list_pods at scrape time, so a clean stop leaves it untouched
+        # (the deleted Pod simply stops being counted on the next scrape).
         client = _FakeClient()
         client.read_responses = [{"status": {"phase": "Running", "podIP": "10.0.0.5"}}]
         sp, state = self._spawner_with_metrics(client)
 
         handle = await sp.spawn(uuid4(), "hechun-1", {})
-        assert _metric_value(state, "kimo_active_sandboxes") == 1.0
+        # Pre-seed the gauge to a sentinel to prove stop doesn't dec it.
+        state.metrics["active_sandboxes"].set(5)
         await sp.stop(handle)
-        assert _metric_value(state, "kimo_active_sandboxes") == 0.0
+        assert _metric_value(state, "kimo_active_sandboxes") == 5.0
 
-    async def test_stop_404_still_decrements_active(self):
+    async def test_stop_404_does_not_touch_gauge(self):
+        # 404 (Pod already gone) is swallowed and the gauge is left to the
+        # list_pods derivation — no manual dec.
         client = _FakeClient()
         client.read_responses = [{"status": {"phase": "Running", "podIP": "10.0.0.5"}}]
         sp, state = self._spawner_with_metrics(client)
@@ -284,10 +294,14 @@ class TestSpawnMetrics:
             raise CciApiError("delete_pod", 404, "NotFound", "gone")
 
         client.delete_pod = delete_404  # type: ignore[assignment]
+        state.metrics["active_sandboxes"].set(3)
         await sp.stop(handle)  # no raise
-        assert _metric_value(state, "kimo_active_sandboxes") == 0.0
+        assert _metric_value(state, "kimo_active_sandboxes") == 3.0
 
-    async def test_stop_non_404_does_not_decrement(self):
+    async def test_stop_non_404_raises_and_leaves_gauge(self):
+        # A real delete failure (500) still propagates; the gauge is untouched
+        # either way (derived from list_pods at scrape — the Pod, if still Running,
+        # is still counted there).
         client = _FakeClient()
         client.read_responses = [{"status": {"phase": "Running", "podIP": "10.0.0.5"}}]
         sp, state = self._spawner_with_metrics(client)
@@ -297,9 +311,9 @@ class TestSpawnMetrics:
             raise CciApiError("delete_pod", 500, "Err", "boom")
 
         client.delete_pod = delete_500  # type: ignore[assignment]
+        state.metrics["active_sandboxes"].set(1)
         with pytest.raises(CciApiError):
             await sp.stop(handle)
-        # delete failed → Pod may still be Running → gauge stays at 1.
         assert _metric_value(state, "kimo_active_sandboxes") == 1.0
 
     async def test_metrics_none_does_not_crash(self):

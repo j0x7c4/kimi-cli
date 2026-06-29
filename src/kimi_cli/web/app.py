@@ -56,8 +56,12 @@ try:
 except Exception:
     ContainerRunner = None  # type: ignore[misc,assignment]
 
-# Configure logging based on LOG_LEVEL environment variable
-_log_level = os.environ.get("LOG_LEVEL", "WARNING").upper()
+# Configure logging based on LOG_LEVEL environment variable.
+# hechun-fork-cci: default INFO (was WARNING). WARNING swallowed the CCI Pod
+# lifecycle logs — idle/leak sweeper "reclaiming …", reconcile_orphans "删除 N 个
+# 孤儿 Pod", worker-exit Pod 回收 —— all emit at INFO, so排查泄漏时全看不见（绕了
+# 一圈才发现）。Operators can still pin LOG_LEVEL=WARNING in env to quiet it.
+_log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
 logger.remove()
 logger.enable("kimi_cli")
 logger.add(sys.stderr, level=_log_level)
@@ -153,17 +157,29 @@ ENV_LAN_ONLY = "KIMI_WEB_LAN_ONLY"
 _ENV_RECONCILE_ON_STARTUP = "KIMI_CCI_RECONCILE_ON_STARTUP"  # 默认开（单实例假设）
 _ENV_SWEEP_INTERVAL = "KIMI_CCI_SWEEP_INTERVAL_SECONDS"  # 默认 60s
 _ENV_IDLE_TTL = "KIMI_CCI_IDLE_TTL_SECONDS"  # 默认 900s = 15min
+_ENV_DEAD_TTL = "KIMI_CCI_DEAD_TTL_SECONDS"  # 默认 30s：error/dead session 删 Pod 前的宽限
 
 
-async def _reclaim_idle_cci_sessions(runner: Any, *, idle_ttl_s: int) -> int:
-    """One sweep pass: stop_worker() every CCI session idle past ``idle_ttl_s``.
+async def _reclaim_idle_cci_sessions(
+    runner: Any, *, idle_ttl_s: int, dead_ttl_s: int = 30
+) -> int:
+    """One sweep pass: reclaim every CCI session that should no longer hold a Pod.
 
-    hechun-fork-cci. A session is reclaimed iff ALL hold:
-      • it is CCI-backed (has a ``handle`` attribute → CCISessionProcess);
-      • its worker is alive AND there is currently a sandbox handle (a spawn that
-        already completed — never mid-spawn, where handle is still None);
-      • status.state is ``idle`` (NOT busy, NOT restarting, NOT stopped/error);
-      • ``now - last_active_at > idle_ttl_s``.
+    hechun-fork-cci 周期兜底. A CCI session (has a ``handle`` attribute →
+    CCISessionProcess) that still owns a Pod is reclaimed when ANY of:
+
+      • **idle**：worker alive, status ``idle``, ``now - last_active_at > idle_ttl_s``
+        （正常空闲回收 —— 防 Pod 永久 Running 计费）；
+      • **dead**：worker 已不 alive（``is_alive`` False）—— worker 死了 Pod 无价值，
+        立即删（这是「主修复(worker 退出即删 Pod)漏了 / 删 Pod 失败」时的周期补刀）；
+      • **error**：status ``error`` 持续超 ``dead_ttl_s``（worker 进 error 态，read-loop
+        报错/process_exit；给点宽限避免和正在收尾的 _on_worker_exit 抢，超时仍在就删）；
+      • **stopped**：status ``stopped`` 但 handle 仍在（stop_worker 没删干净的残留）。
+
+    Never reclaims:
+      • mid-spawn（handle 仍 None）—— spawn 进行中绝不碰；
+      • ``busy``（prompt in flight）/ ``restarting``（config-reload 中）；
+      • idle 但未超 TTL。
 
     Under CCI ``stop_worker`` deletes the Pod (billing stops). Returns the number
     of sessions reclaimed. Never raises — per-session failures are logged + skipped
@@ -186,22 +202,31 @@ async def _reclaim_idle_cci_sessions(runner: Any, *, idle_ttl_s: int) -> int:
                 # Skipping mid-spawn (handle still None) is the safety guarantee
                 # that we never reclaim a session while spawn is in progress.
                 continue
-            if not proc.is_alive:
-                continue
-            # Only reclaim genuinely idle sessions. busy = prompt in flight;
-            # restarting = config-reload in progress; both must be left alone.
-            if proc.status.state != "idle":
-                continue
+
+            state = proc.status.state
             last = proc.last_active_at
-            if last is None or (now - last) <= idle_ttl_s:
+            reason = _classify_reclaim(
+                state=state,
+                is_alive=proc.is_alive,
+                last_active_at=last,
+                now=now,
+                idle_ttl_s=idle_ttl_s,
+                dead_ttl_s=dead_ttl_s,
+            )
+            if reason is None:
                 continue
-            idle_for = int(now - last)
+
+            idle_for = int(now - last) if last is not None else -1
             logger.info(
-                "[cci-sweeper] reclaiming idle session {sid} (idle {s}s > ttl)",
+                "[cci-sweeper] reclaiming session {sid} reason={r} state={st} "
+                "alive={a} idle={s}s",
                 sid=sid,
+                r=reason,
+                st=state,
+                a=proc.is_alive,
                 s=idle_for,
             )
-            await proc.stop_worker(reason="idle_reclaim")
+            await proc.stop_worker(reason=reason)
             reclaimed += 1
         except Exception as e:  # noqa: BLE001 — one bad session can't abort the sweep
             logger.warning(
@@ -210,8 +235,54 @@ async def _reclaim_idle_cci_sessions(runner: Any, *, idle_ttl_s: int) -> int:
     return reclaimed
 
 
-async def _cci_idle_sweeper(runner: Any, *, interval_s: int, idle_ttl_s: int) -> None:
-    """Background loop: every ``interval_s`` reclaim idle CCI sessions.
+def _classify_reclaim(
+    *,
+    state: str,
+    is_alive: bool,
+    last_active_at: float | None,
+    now: float,
+    idle_ttl_s: int,
+    dead_ttl_s: int,
+) -> str | None:
+    """Decide why (if at all) a Pod-owning CCI session should be reclaimed.
+
+    Returns the stop reason (``idle_reclaim`` / ``dead_reclaim`` / ``error_reclaim``
+    / ``stopped_reclaim``) or ``None`` to keep the session. Pure function → trivially
+    unit-testable. Caller has already confirmed the session owns a handle.
+    """
+    # busy = prompt in flight; restarting = config-reload — never touch either.
+    if state in ("busy", "restarting"):
+        return None
+
+    # Worker no longer alive but Pod still attached → the主修复 missed it (or its
+    # delete failed). Reclaim regardless of state (covers error/stopped too).
+    if not is_alive:
+        return "dead_reclaim"
+
+    # Worker in ``error`` past the dead grace → reclaim (read-loop/process_exit
+    # error that didn't clear the handle). Grace avoids racing _on_worker_exit.
+    if state == "error":
+        if last_active_at is None or (now - last_active_at) > dead_ttl_s:
+            return "error_reclaim"
+        return None
+
+    # ``stopped`` but a handle lingers → stop_worker didn't delete cleanly.
+    if state == "stopped":
+        return "stopped_reclaim"
+
+    # Genuinely idle past the TTL → normal cost reclaim.
+    if state == "idle":
+        if last_active_at is None or (now - last_active_at) <= idle_ttl_s:
+            return None
+        return "idle_reclaim"
+
+    return None
+
+
+async def _cci_idle_sweeper(
+    runner: Any, *, interval_s: int, idle_ttl_s: int, dead_ttl_s: int = 30
+) -> None:
+    """Background loop: every ``interval_s`` reclaim reclaimable CCI sessions.
 
     hechun-fork-cci. Lives for the app lifespan (cancelled on shutdown). Each pass
     is wrapped so any exception is swallowed + logged — the sweeper must never die
@@ -221,9 +292,11 @@ async def _cci_idle_sweeper(runner: Any, *, interval_s: int, idle_ttl_s: int) ->
     while True:
         try:
             await asyncio.sleep(interval_s)
-            n = await _reclaim_idle_cci_sessions(runner, idle_ttl_s=idle_ttl_s)
+            n = await _reclaim_idle_cci_sessions(
+                runner, idle_ttl_s=idle_ttl_s, dead_ttl_s=dead_ttl_s
+            )
             if n:
-                logger.info("[cci-sweeper] reclaimed {n} idle CCI session(s)", n=n)
+                logger.info("[cci-sweeper] reclaimed {n} CCI session(s)", n=n)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001 — never let the sweeper crash
@@ -387,13 +460,20 @@ def create_app(
         if _spawner_backend == "cci" and app.state.spawner is not None:
             interval = _int_env(_ENV_SWEEP_INTERVAL, default=60)
             idle_ttl = _int_env(_ENV_IDLE_TTL, default=900)
+            dead_ttl = _int_env(_ENV_DEAD_TTL, default=30)
             sweeper_task = asyncio.create_task(
-                _cci_idle_sweeper(runner, interval_s=interval, idle_ttl_s=idle_ttl)
+                _cci_idle_sweeper(
+                    runner,
+                    interval_s=interval,
+                    idle_ttl_s=idle_ttl,
+                    dead_ttl_s=dead_ttl,
+                )
             )
             logger.info(
-                "[create_app] CCI idle sweeper on interval={i}s idle_ttl={t}s",
+                "[create_app] CCI sweeper on interval={i}s idle_ttl={t}s dead_ttl={d}s",
                 i=interval,
                 t=idle_ttl,
+                d=dead_ttl,
             )
 
         try:

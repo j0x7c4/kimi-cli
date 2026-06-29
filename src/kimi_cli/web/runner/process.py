@@ -450,6 +450,16 @@ class SessionProcess:
         except Exception as e:
             logger.warning(f"Unexpected error in read loop: {e.__class__.__name__} {e}")
             self._in_flight_prompt_ids.clear()
+            # hechun-fork-cci: the read loop blew up (e.g. exec WebSocket dropped) —
+            # this is also an unexpected worker death, so let backends react (CCI
+            # deletes the now-worthless Pod here, otherwise the keepalive Pod leaks
+            # Running forever — the very leak this branch was missing). No-op in the
+            # base class, so docker/local behaviour is unchanged. Must not raise.
+            with contextlib.suppress(Exception):
+                await self._on_worker_exit(
+                    self._transport_returncode(),
+                    f"read loop error: {e.__class__.__name__} {e}".encode(),
+                )
             await self._emit_status("error", reason="read_loop_error", detail=str(e))
 
     async def _handle_out_message(self, message: JSONRPCOutMessage) -> None:

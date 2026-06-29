@@ -192,13 +192,16 @@ class CCISpawner:
             # Any other failure (CciApiError on create/read, cancellation, etc.).
             self._record_spawn_result(_RESULT_FAILURE)
             raise
-        # Success: count + observe latency + bump the active gauge.
+        # Success: count + observe latency.
+        # hechun-fork-cci: kimo_active_sandboxes 不再在此 +1 —— 它已改为每次 scrape
+        # 从 list_pods 实时派生（metrics.refresh_active_sandboxes，统一单一真相来源）。
+        # 旧 inc/dec 记账在 worker 死但 Pod 没删时不减、且 gateway 重启后内存计数器漂移，
+        # 故彻底移除调用点，避免与 list_pods 派生双写打架。
         if self.metrics is not None:
             self.metrics.record_spawn(backend=_BACKEND, result=_RESULT_SUCCESS)
             self.metrics.observe_spawn_duration(
                 backend=_BACKEND, seconds=time.perf_counter() - started
             )
-            self.metrics.inc_active_sandboxes(1)
         return SandboxHandle(
             backend="cci",
             handle_id=name,
@@ -317,21 +320,20 @@ class CCISpawner:
 
     async def stop(self, handle: SandboxHandle) -> None:
         # 计费止于 delete 返回 (spec §6) — best-effort; already-gone is fine.
+        # hechun-fork-cci: kimo_active_sandboxes 不再在此 -1 —— 改为 scrape 时
+        # list_pods 实时派生（refresh_active_sandboxes）。delete 接受/404 都让 Pod 从
+        # namespace 消失，下次 scrape 自然不计数，无需手动 dec（手动 dec 会和派生重复扣）。
         from kimi_cli.web.spawner.cci_client import CciApiError  # noqa: PLC0415
 
         try:
             await self.client.delete_pod(self.namespace, handle.handle_id, grace=_GRACE_S)
         except CciApiError as e:
             if e.status == 404:
-                # Pod already gone → still no longer an active sandbox (spec §7.2).
-                if self.metrics is not None:
-                    self.metrics.inc_active_sandboxes(-1)
+                # Pod already gone → already not counted by the list_pods 派生.
                 return
-            # Real delete failure: Pod may still be Running, don't drop the gauge.
+            # Real delete failure: Pod may still be Running → let it raise so the
+            # caller knows; the next scrape still reflects the true Pod count.
             raise
-        # Delete accepted → sandbox no longer active.
-        if self.metrics is not None:
-            self.metrics.inc_active_sandboxes(-1)
 
     async def healthcheck(self, handle: SandboxHandle) -> bool:
         from kimi_cli.web.spawner.cci_client import CciApiError  # noqa: PLC0415

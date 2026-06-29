@@ -248,3 +248,42 @@ class TestBasicAuth:
         app.state.metrics = MetricsState()
         resp = await handler(_FakeRequest(app, {}))
         assert resp.status_code == 200
+
+
+class TestScrapeDerivesActiveGaugeFromListPods:
+    """hechun-fork-cci Point 4: every /metrics scrape sets kimo_active_sandboxes
+    from the REAL list_pods count — overwriting any stale (drifted) inc'd value,
+    making the gauge a single source of truth that never漂移."""
+
+    async def test_scrape_overwrites_stale_inc_with_real_pod_count(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.delenv("KIMI_METRICS_BASIC_AUTH_USER", raising=False)
+        monkeypatch.delenv("KIMI_METRICS_BASIC_AUTH_PASSWORD", raising=False)
+
+        state = MetricsState()
+
+        class _Client:
+            async def read_network(self, ns, name):
+                return {"status": "Ready"}
+
+            async def list_pods(self, ns, **kw):
+                # 1 real sandbox Pod live; the gauge below is stale at 7.
+                return [
+                    {"metadata": {"name": "kimo-sandbox-live"}},
+                    {"metadata": {"name": "cci-imagesnapshot-zzz"}},
+                ]
+
+        state.cci_client = _Client()  # type: ignore[assignment]
+        # Simulate drift: a stale in-memory count left over from inc bookkeeping.
+        state.metrics["active_sandboxes"].set(7)
+
+        handler = _get_handler()
+        app = _FakeApp()
+        app.state.metrics = state
+        resp = await handler(_FakeRequest(app, {}))
+        assert resp.status_code == 200
+        body = resp.body.decode("utf-8")
+        # Scrape re-derived the gauge to the true count (1), discarding the stale 7.
+        assert "kimo_active_sandboxes 1.0" in body
+        assert "kimo_active_sandboxes 7.0" not in body

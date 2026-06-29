@@ -240,6 +240,107 @@ class TestEofAndErrorPaths:
         assert proc.handle is None
 
 
+class TestWorkerExitDeletesPod:
+    """hechun-fork-cci 主修复: an unexpected worker exit (any exit code, or a
+    read-loop error) deletes the now-worthless keepalive Pod immediately, rather
+    than leaking it Running forever (session goes ``error`` but Pod stays up)."""
+
+    async def test_unexpected_exit_deletes_pod(self, monkeypatch: pytest.MonkeyPatch):
+        # Generic non-zero exit (NOT the agent-load code) → Pod must be deleted.
+        stream = FakeExecStream(stdout_lines=[], error=b"boom", returncode=1)
+        proc, spawner = _make_proc(stream, monkeypatch)
+
+        async def noop(_m) -> None:
+            return None
+
+        monkeypatch.setattr(proc, "_broadcast", noop)
+        await proc.start()
+        handle_id = proc.handle.handle_id  # type: ignore[union-attr]
+        proc._expecting_exit = False
+        await proc._read_task
+
+        # spawner.stop was invoked with the dead Pod, handle cleared, stream closed.
+        assert handle_id in spawner.stopped
+        assert proc.handle is None
+        assert stream.closed is True
+        # And the session is no longer "alive" (stream gone).
+        assert proc.is_alive is False
+
+    async def test_clean_exit_when_expecting_exit_does_not_double_delete(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # A graceful stop_worker() already deleted the Pod; a subsequent clean EOF
+        # (expecting_exit=True) must NOT call spawner.stop again (handle already None).
+        stream = FakeExecStream(stdout_lines=[])
+        proc, spawner = _make_proc(stream, monkeypatch)
+
+        async def noop(_m) -> None:
+            return None
+
+        monkeypatch.setattr(proc, "_broadcast", noop)
+        await proc.start()
+        await proc.stop_worker()  # deletes the Pod once (expected path)
+        assert len(spawner.stopped) == 1
+        # The read loop already ended on cancel; re-running it is a no-op. The clean
+        # EOF branch (expecting_exit) never reaches _on_worker_exit, so no 2nd delete.
+        assert len(spawner.stopped) == 1
+
+    async def test_read_loop_error_deletes_pod(self, monkeypatch: pytest.MonkeyPatch):
+        # The read loop blows up (e.g. exec WS dropped mid-stream) → the read_loop_error
+        # branch must also release the Pod via _on_worker_exit (the leak this branch
+        # was missing). Drive _read_loop directly with a readline that raises, so the
+        # generic-exception path is hit deterministically (no EOF race).
+        stream = FakeExecStream(stdout_lines=[])
+
+        async def boom() -> bytes:
+            raise RuntimeError("exec websocket dropped")
+
+        stream.readline = boom  # type: ignore[method-assign]
+        proc, spawner = _make_proc(stream, monkeypatch)
+
+        async def noop(_m) -> None:
+            return None
+
+        monkeypatch.setattr(proc, "_broadcast", noop)
+
+        # Manually wire the spawn result without starting the auto read task.
+        from kimi_cli.web.spawner import SandboxHandle
+
+        handle = SandboxHandle(backend="cci", handle_id="kimo-sandbox-x")
+        proc._handle = handle
+        proc._exec_stream = stream
+
+        await proc._read_loop()
+
+        assert "kimo-sandbox-x" in spawner.stopped
+        assert proc.handle is None
+        assert proc.status.state == "error"
+
+    async def test_agent_load_failure_still_deletes_pod(self, monkeypatch: pytest.MonkeyPatch):
+        # The agent-load-failure exit code path ALSO deletes the Pod now (it used to
+        # only record the metric + broadcast, leaving the Pod Running).
+        from kimi_cli.web.runner.worker import AGENT_LOAD_FAILURE_EXIT_CODE
+
+        stream = FakeExecStream(
+            stdout_lines=[],
+            error=b"required agent could not be loaded",
+            returncode=AGENT_LOAD_FAILURE_EXIT_CODE,
+        )
+        proc, spawner = _make_proc(stream, monkeypatch)
+
+        async def noop(_m) -> None:
+            return None
+
+        monkeypatch.setattr(proc, "_broadcast", noop)
+        await proc.start()
+        handle_id = proc.handle.handle_id  # type: ignore[union-attr]
+        proc._expecting_exit = False
+        await proc._read_task
+
+        assert handle_id in spawner.stopped
+        assert proc.handle is None
+
+
 class TestCCIRunner:
     async def test_get_or_create_returns_cci_process(self, monkeypatch: pytest.MonkeyPatch):
         stream = FakeExecStream(stdout_lines=[])

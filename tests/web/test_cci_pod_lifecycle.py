@@ -18,7 +18,7 @@ from uuid import uuid4
 
 import pytest
 
-from kimi_cli.web.app import _reclaim_idle_cci_sessions
+from kimi_cli.web.app import _classify_reclaim, _reclaim_idle_cci_sessions
 
 
 class _FakeStatus:
@@ -132,12 +132,54 @@ class TestReclaimIdleCCISessions:
         assert n == 0
         assert proc.stopped_with == []
 
-    async def test_dead_worker_skipped(self):
+    async def test_dead_worker_reclaimed(self):
+        # hechun-fork-cci 扩面：worker 已不 alive 但 Pod 还在（handle 非空）→ 周期兜底
+        # 删 Pod（主修复漏了/删 Pod 失败时的补刀），不再 skip。
         sid = uuid4()
         proc = _FakeCCIProc(state="idle", idle_for=10_000, is_alive=False)
         n = await _reclaim_idle_cci_sessions(_FakeRunner({sid: proc}), idle_ttl_s=900)
+        assert n == 1
+        assert proc.stopped_with == ["dead_reclaim"]
+
+    async def test_dead_worker_reclaimed_even_when_recently_active(self):
+        # Dead worker is reclaimed regardless of last_active_at (a dead Pod is
+        # worthless even if it died seconds ago).
+        sid = uuid4()
+        proc = _FakeCCIProc(state="idle", idle_for=5, is_alive=False)
+        n = await _reclaim_idle_cci_sessions(_FakeRunner({sid: proc}), idle_ttl_s=900)
+        assert n == 1
+        assert proc.stopped_with == ["dead_reclaim"]
+
+    async def test_error_session_reclaimed_past_dead_ttl(self):
+        # worker still "alive" (stream not yet torn down) but in error state past
+        # the dead grace → reclaim (error_reclaim).
+        sid = uuid4()
+        proc = _FakeCCIProc(state="error", idle_for=100, is_alive=True)
+        n = await _reclaim_idle_cci_sessions(
+            _FakeRunner({sid: proc}), idle_ttl_s=900, dead_ttl_s=30
+        )
+        assert n == 1
+        assert proc.stopped_with == ["error_reclaim"]
+
+    async def test_error_session_within_dead_ttl_not_reclaimed(self):
+        # error but only 5s ago < 30s grace → leave it (gives _on_worker_exit time
+        # to finish its own cleanup without the sweeper racing it).
+        sid = uuid4()
+        proc = _FakeCCIProc(state="error", idle_for=5, is_alive=True)
+        n = await _reclaim_idle_cci_sessions(
+            _FakeRunner({sid: proc}), idle_ttl_s=900, dead_ttl_s=30
+        )
         assert n == 0
         assert proc.stopped_with == []
+
+    async def test_stopped_session_with_lingering_handle_reclaimed(self):
+        # status stopped but a handle still lingers → stop_worker didn't delete
+        # cleanly → reclaim (stopped_reclaim).
+        sid = uuid4()
+        proc = _FakeCCIProc(state="stopped", idle_for=10, is_alive=True)
+        n = await _reclaim_idle_cci_sessions(_FakeRunner({sid: proc}), idle_ttl_s=900)
+        assert n == 1
+        assert proc.stopped_with == ["stopped_reclaim"]
 
     async def test_one_bad_session_does_not_abort_sweep(self):
         good_sid, bad_sid = uuid4(), uuid4()
@@ -171,6 +213,72 @@ class TestReclaimIdleCCISessions:
         assert n == 1
         assert cci.stopped_with == ["idle_reclaim"]
         assert docker.stopped_with == []
+
+
+class TestClassifyReclaim:
+    """Pure decision function behind the sweeper扩面 (hechun-fork-cci)."""
+
+    _NOW = 1_000_000.0
+
+    def _classify(self, *, state, is_alive, last_active_at, idle_ttl_s=900, dead_ttl_s=30):
+        return _classify_reclaim(
+            state=state,
+            is_alive=is_alive,
+            last_active_at=last_active_at,
+            now=self._NOW,
+            idle_ttl_s=idle_ttl_s,
+            dead_ttl_s=dead_ttl_s,
+        )
+
+    def test_busy_never_reclaimed(self):
+        assert self._classify(state="busy", is_alive=True, last_active_at=0) is None
+
+    def test_restarting_never_reclaimed(self):
+        assert self._classify(state="restarting", is_alive=True, last_active_at=0) is None
+
+    def test_dead_takes_priority_over_state(self):
+        # Dead worker → dead_reclaim regardless of the (stale) status state.
+        assert self._classify(state="idle", is_alive=False, last_active_at=self._NOW) == (
+            "dead_reclaim"
+        )
+        assert self._classify(state="stopped", is_alive=False, last_active_at=0) == (
+            "dead_reclaim"
+        )
+
+    def test_busy_but_dead_is_left_to_avoid_killing_a_real_prompt(self):
+        # busy short-circuits before the dead check: a worker we *think* is busy is
+        # never force-killed by the sweeper (the busy-timeout backstop is separate).
+        assert self._classify(state="busy", is_alive=False, last_active_at=0) is None
+
+    def test_error_past_grace(self):
+        assert self._classify(
+            state="error", is_alive=True, last_active_at=self._NOW - 60
+        ) == "error_reclaim"
+
+    def test_error_within_grace(self):
+        assert self._classify(
+            state="error", is_alive=True, last_active_at=self._NOW - 5
+        ) is None
+
+    def test_error_no_timestamp_reclaimed(self):
+        assert self._classify(state="error", is_alive=True, last_active_at=None) == (
+            "error_reclaim"
+        )
+
+    def test_stopped_with_handle(self):
+        assert self._classify(state="stopped", is_alive=True, last_active_at=0) == (
+            "stopped_reclaim"
+        )
+
+    def test_idle_past_ttl(self):
+        assert self._classify(
+            state="idle", is_alive=True, last_active_at=self._NOW - 1000
+        ) == "idle_reclaim"
+
+    def test_idle_within_ttl(self):
+        assert self._classify(
+            state="idle", is_alive=True, last_active_at=self._NOW - 60
+        ) is None
 
 
 # ── B (app-wiring): reconcile_orphans 启动调用受 env gate 控制 ──────────────────

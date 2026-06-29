@@ -194,7 +194,16 @@ class MetricsState:
             self.metrics["spawn_duration"].labels(backend=backend).observe(seconds)
 
     def inc_active_sandboxes(self, delta: int = 1) -> None:
-        """``kimo_active_sandboxes`` += delta (spawn success +1 / stop -1)."""
+        """``kimo_active_sandboxes`` += delta.
+
+        hechun-fork-cci: NO LONGER called from the spawn/stop call-sites — the
+        gauge is now derived from the real ``list_pods`` count on every scrape
+        (:meth:`refresh_active_sandboxes`), the single source of truth, because
+        inc/dec bookkeeping drifted whenever a Pod vanished outside the gateway's
+        stop path (worker self-death, out-of-band delete, gateway restart). Kept
+        only as a low-level helper / for tests; ``refresh_active_sandboxes``
+        overwrites whatever this sets on the next scrape.
+        """
         with contextlib.suppress(Exception):
             self.metrics["active_sandboxes"].inc(delta)
 
