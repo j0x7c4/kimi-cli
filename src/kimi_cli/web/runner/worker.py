@@ -127,11 +127,23 @@ def _fetch_sandbox_assets() -> None:
 
     token = os.environ.get(_ASSETS_TOKEN_ENV, "").strip()
     headers = {"Authorization": f"Bearer {token}"} if token else {}
+    from kimi_cli.web.api.sandbox_assets import KNOWLEDGE_BUNDLE_PREFIX  # noqa: PLC0415
+
     home = Path.home()
+    # Knowledge base unpacks under the session work_dir (load_knowledge_base +
+    # the agent's ReadFile both resolve relative to work_dir); agents (and any
+    # other member) unpack under $HOME where discover_user_agent_specs also
+    # searches. work_dir mirrors run_worker's KIMI_WORK_DIR-or-/app logic.
+    work_dir = Path(os.environ.get("KIMI_WORK_DIR") or "/app")
+
+    def _is_kb(name: str) -> bool:
+        return name == KNOWLEDGE_BUNDLE_PREFIX or name.startswith(KNOWLEDGE_BUNDLE_PREFIX + "/")
+
     try:
         resp = httpx.get(url, headers=headers, timeout=30.0)
         resp.raise_for_status()
         data = resp.content
+        n_kb = 0
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tar:
             members = [m for m in tar.getmembers() if _is_safe_tar_member(m.name)]
             rejected = len(tar.getmembers()) - len(members)
@@ -140,12 +152,19 @@ def _fetch_sandbox_assets() -> None:
                     "[sandbox-assets] rejected {n} unsafe tar member(s) (path traversal)",
                     n=rejected,
                 )
-            tar.extractall(path=home, members=members)  # noqa: S202 — members filtered above
+            for m in members:
+                if _is_kb(m.name):
+                    tar.extract(m, path=work_dir)  # noqa: S202 — members filtered above
+                    n_kb += 1
+                else:
+                    tar.extract(m, path=home)  # noqa: S202 — members filtered above
         logger.info(
-            "[sandbox-assets] fetched + extracted bundle from gateway "
-            "({size} bytes, {n} members) into {home}",
+            "[sandbox-assets] fetched + extracted bundle ({size} bytes, {n} members; "
+            "{nkb} knowledge->{wd}, rest->{home})",
             size=len(data),
             n=len(members),
+            nkb=n_kb,
+            wd=str(work_dir),
             home=str(home),
         )
     except Exception as e:  # noqa: BLE001 — must not crash worker startup

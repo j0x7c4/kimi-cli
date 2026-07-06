@@ -20,7 +20,7 @@ from kimi_cli.background import BackgroundTaskManager
 from kimi_cli.config import Config
 from kimi_cli.exception import MCPConfigError, SystemPromptTemplateError
 from kimi_cli.llm import LLM
-from kimi_cli.memory import get_user_memory_dir, load_knowledge_base
+from kimi_cli.memory import get_knowledge_dir, get_user_memory_dir, load_knowledge_base
 from kimi_cli.notifications import NotificationManager
 from kimi_cli.session import Session
 from kimi_cli.skill import (
@@ -60,6 +60,14 @@ class BuiltinSystemPromptArgs:
     """The merged content of AGENTS.md files (from project root to work_dir)."""
     KIMI_KNOWLEDGE_BASE: str
     """The merged shared knowledge base from {work_dir}/.kimi/memory/knowledge/."""
+    KIMI_KNOWLEDGE_DIR: str
+    """Absolute path of the knowledge base directory ({work_dir}/.kimi/memory/knowledge).
+
+    Prompts reference this instead of hard-coding the physical path, so the
+    knowledge base can move without editing agent prompts. The index injected via
+    ``KIMI_KNOWLEDGE_BASE`` lists topics with wiki-relative links (e.g.
+    ``[[concepts/TIR]]``); the agent reads a page with ``ReadFile`` at
+    ``${KIMI_KNOWLEDGE_DIR}/<link>.md``."""
     KIMI_SKILLS: str
     """Formatted information about available skills."""
     KIMI_ADDITIONAL_DIRS_INFO: str
@@ -327,6 +335,7 @@ class Runtime:
                 KIMI_WORK_DIR_LS=ls_output,
                 KIMI_AGENTS_MD=agents_md or "",
                 KIMI_KNOWLEDGE_BASE=knowledge_base or "",
+                KIMI_KNOWLEDGE_DIR=str(get_knowledge_dir(work_dir_local)),
                 KIMI_SKILLS=skills_formatted or "No skills found.",
                 KIMI_ADDITIONAL_DIRS_INFO=additional_dirs_info,
                 KIMI_OS=environment.os_kind,

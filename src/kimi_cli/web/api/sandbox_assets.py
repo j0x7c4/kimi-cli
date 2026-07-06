@@ -46,7 +46,16 @@ from kimi_cli.web.auth import extract_token_from_request, verify_token
 # extra skill bundles, ...), append the new ``$HOME``-relative directory here.
 _BUNDLE_DIRS: list[str] = [
     ".kimi/agents",  # custom agent specs (diabetes-expert.yaml + system prompt)
+    ".kimi/memory/knowledge",  # knowledge base tree (index.md + wiki/, packed recursively)
 ]
+
+# Bundle members under this prefix are the knowledge base. The worker unpacks
+# them under the session ``work_dir`` (not ``$HOME``) so ``load_knowledge_base``
+# and the agent's ReadFile (both resolve relative to ``work_dir``) find them;
+# everything else (``.kimi/agents``) unpacks under ``$HOME`` where
+# ``discover_user_agent_specs`` also searches. Kept here so the worker's
+# split-extract stays aligned with what this side packs.
+KNOWLEDGE_BUNDLE_PREFIX = ".kimi/memory/knowledge"
 
 # Endpoint path. Kept as a module constant so the env-injection side
 # (cci_process._build_sandbox_env) can be aligned without string drift.

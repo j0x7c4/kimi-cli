@@ -23,4 +23,4 @@ agent:
     - "kimi_cli.tools.memory:Memory"
   subagents: ~
   allowed_skills: []
-  knowledge_base: false
+  knowledge_base: true
