@@ -21,6 +21,7 @@ from uuid import UUID, uuid4
 from kimi_cli import logger
 from kimi_cli.memory import resolve_owner_id
 from kimi_cli.utils.subprocess_env import get_clean_env
+from kimi_cli.web.api.sandbox_assets import SANDBOX_ASSETS_PATH
 from kimi_cli.web.runner.process import KimiCLIRunner, SessionProcess
 
 
@@ -323,10 +324,17 @@ class ContainerSessionProcess(SessionProcess):
         if custom_skills:
             cmd.extend(["-v", f"{custom_skills}:/root/.config/agents/skills:ro"])
 
+        # hechun-fork: docker 模式复用 CCI bundle 下发（KIMO_GATEWAY_INTERNAL_URL 门控）。
+        # 非空 => 走 bundle 下发：worker 启动时把 agents/knowledge 解包到 $HOME/work_dir，
+        # 此时不能再把 ~/.kimi/agents 只读 bind-mount（会与解包写入冲突），与 CCI「全下载、
+        # 零挂载」保持一致。空 => dev/未配 gateway 内网地址，行为与改动前完全一致。
+        internal_url = (os.environ.get("KIMO_GATEWAY_INTERNAL_URL") or "").strip()
+
         # Mount user agent specs directory (for subagent yaml discovery).
         # kimi-cli's agentspec.discover() searches ~/.kimi/agents at sandbox startup.
+        # Skipped under bundle mode (internal_url set): the worker unpacks agents itself.
         custom_agents = os.environ.get("CUSTOM_AGENTS_HOST_PATH")
-        if custom_agents:
+        if custom_agents and not internal_url:
             cmd.extend(["-v", f"{custom_agents}:/root/.kimi/agents:ro"])
 
         # Mount HuggingFace cache directory if configured
@@ -366,6 +374,17 @@ class ContainerSessionProcess(SessionProcess):
         subagent = _read_subagent_from_disk(self.session_id)
         if subagent:
             cmd.extend(["-e", f"SUBAGENT={subagent}"])
+
+        # hechun-fork: docker 模式复用 CCI bundle 下发（KIMO_GATEWAY_INTERNAL_URL 门控）。
+        # internal_url 非空时注入 assets 下载 URL + token，worker 启动时从 gateway 的
+        # sandbox-assets 端点拉 bundle（agents + .kimi/memory/knowledge）解包。URL/token 由
+        # gateway 组装，非 _SANDBOX_ENV_VARS 直通。空时不注入 => 与改动前一致（走 bind-mount）。
+        if internal_url:
+            assets_url = internal_url.rstrip("/") + SANDBOX_ASSETS_PATH
+            cmd.extend(["-e", f"KIMO_SANDBOX_ASSETS_URL={assets_url}"])
+            token = os.environ.get("KIMI_WEB_SESSION_TOKEN")
+            if token:
+                cmd.extend(["-e", f"KIMO_SANDBOX_ASSETS_TOKEN={token}"])
 
         # Image + entrypoint command (runs start-sandbox.sh which launches
         # Xvfb, kernel server, browser guard, and finally the worker)

@@ -129,6 +129,48 @@ def test_build_docker_cmd_forwards_hechun_env_vars(
     assert "HECHUN_MCP_TOKEN=mcp-jwt-xyz" in cmd
 
 
+def test_build_docker_cmd_injects_assets_env_when_gateway_internal_url_set(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """hechun-fork: KIMO_GATEWAY_INTERNAL_URL 非空 => docker cmd 注入 assets URL+token，
+    且不再 bind-mount agents（与 CCI bundle 下发一致）。"""
+    from kimi_cli.web.api.sandbox_assets import SANDBOX_ASSETS_PATH
+
+    sid = uuid4()
+    monkeypatch.setenv("KIMI_SHARE_DIR", str(tmp_path))
+    monkeypatch.setenv("KIMO_GATEWAY_INTERNAL_URL", "http://gateway:8080/")
+    monkeypatch.setenv("KIMI_WEB_SESSION_TOKEN", "sess-tok-abc")
+    monkeypatch.setenv("CUSTOM_AGENTS_HOST_PATH", "/host/agents")
+
+    proc = container_mod.ContainerSessionProcess(sid)
+    cmd = proc._build_docker_cmd()
+
+    assert f"KIMO_SANDBOX_ASSETS_URL=http://gateway:8080{SANDBOX_ASSETS_PATH}" in cmd
+    assert "KIMO_SANDBOX_ASSETS_TOKEN=sess-tok-abc" in cmd
+    # bundle 模式下 agents 不再挂载（worker 解包到 $HOME）
+    assert not any(part == "/host/agents:/root/.kimi/agents:ro" for part in cmd)
+
+
+def test_build_docker_cmd_omits_assets_env_and_keeps_agent_mount_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """hechun-fork: KIMO_GATEWAY_INTERNAL_URL 未配（dev）=> 不注入 assets env，
+    仍 bind-mount agents，行为与改动前一致（不回归）。"""
+    sid = uuid4()
+    monkeypatch.setenv("KIMI_SHARE_DIR", str(tmp_path))
+    monkeypatch.delenv("KIMO_GATEWAY_INTERNAL_URL", raising=False)
+    monkeypatch.setenv("CUSTOM_AGENTS_HOST_PATH", "/host/agents")
+
+    proc = container_mod.ContainerSessionProcess(sid)
+    cmd = proc._build_docker_cmd()
+
+    assert not any(part.startswith("KIMO_SANDBOX_ASSETS_URL=") for part in cmd)
+    assert not any(part.startswith("KIMO_SANDBOX_ASSETS_TOKEN=") for part in cmd)
+    assert "/host/agents:/root/.kimi/agents:ro" in cmd
+
+
 def test_sandbox_env_vars_includes_kimo_storage_backend_vars() -> None:
     """M4 §2.4.2.J: storage backend 切换 env 必须在 _SANDBOX_ENV_VARS 列表里。
 
