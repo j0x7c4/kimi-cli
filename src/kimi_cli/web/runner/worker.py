@@ -240,6 +240,17 @@ async def run_worker(session_id: UUID) -> None:
             with contextlib.suppress(Exception):
                 session.state.owner_id = owner_env
 
+        # yolo env 兜底（storage 读失败 / Pod 无 mysql 凭证时）。CCI fresh session 若 storage
+        # 读回失败，yolo 停在 False → MCP/Memory 等工具调用卡在 approval.request 的无限 await
+        # （iOS/Flutter 简化 UI 无审批路径 → 永久卡死，见上方注释 + soul/approval.py）。
+        # gateway 的 KIMO_DEFAULT_YOLO 经 _SANDBOX_ENV_VARS 转发进 Pod，这里作权威兜底。
+        if (
+            os.environ.get("KIMO_DEFAULT_YOLO", "").lower() in {"1", "true", "yes"}
+            and not session.state.approval.yolo
+        ):
+            session.state.approval.yolo = True
+            logger.info("CCI fresh session yolo=True from KIMO_DEFAULT_YOLO env fallback")
+
     # Load default MCP config file if it exists
     default_mcp_file = get_global_mcp_config_file()
     mcp_configs: list[dict[str, Any]] = []

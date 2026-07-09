@@ -197,6 +197,9 @@ _SANDBOX_ENV_VARS = [
     "INTERNAL_API_TOKEN",
     "HECHUN_MCP_URL",
     "HECHUN_MCP_TOKEN",
+    # CCI fresh session 的 yolo 兜底：storage 读回失败时 worker.py 从此 env 把 approval.yolo
+    # 置 True（否则 headless iOS/Flutter session 的工具调用卡在 approval 无限等待）。
+    "KIMO_DEFAULT_YOLO",
 ]
 
 
