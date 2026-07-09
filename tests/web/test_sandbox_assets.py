@@ -43,6 +43,19 @@ def _write_agent(home: Path) -> Path:
     return spec
 
 
+def _write_mcp_config(home: Path) -> Path:
+    cfg_dir = home / ".config" / "agents"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    mcp = cfg_dir / "mcp.json"
+    mcp.write_text(
+        '{"servers":{"hechun":{"url":"${HECHUN_MCP_URL}",'
+        '"headers":{"Authorization":"Bearer ${HECHUN_MCP_TOKEN}",'
+        '"X-Hechun-User":"${KIMI_USER_ID}"}}}}',
+        encoding="utf-8",
+    )
+    return mcp
+
+
 def _tar_member_names(data: bytes) -> list[str]:
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tar:
         return tar.getnames()
@@ -73,6 +86,16 @@ def test_build_tar_extracts_back_to_home(tmp_path: Path) -> None:
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tar:
         tar.extractall(path=dst)  # noqa: S202 — trusted test fixture
     assert (dst / ".kimi" / "agents" / "diabetes-expert.yaml").is_file()
+
+
+def test_build_tar_packs_mcp_config_under_config_agents(tmp_path: Path) -> None:
+    """mcp.json under ~/.config/agents is packed relative to $HOME so the worker
+    unpacks it to ~/.config/agents/mcp.json (the auto-discovery path)."""
+    _write_mcp_config(tmp_path)
+    data = build_assets_tar(tmp_path)
+    names = _tar_member_names(data)
+    assert ".config/agents/mcp.json" in names
+    assert all(not n.startswith("/") for n in names)
 
 
 def test_build_tar_missing_dir_yields_empty_tar(tmp_path: Path) -> None:

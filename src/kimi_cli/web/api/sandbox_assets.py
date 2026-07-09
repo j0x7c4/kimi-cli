@@ -47,6 +47,7 @@ from kimi_cli.web.auth import extract_token_from_request, verify_token
 _BUNDLE_DIRS: list[str] = [
     ".kimi/agents",  # custom agent specs (diabetes-expert.yaml + system prompt)
     ".kimi/memory/knowledge",  # knowledge base tree (index.md + wiki/, packed recursively)
+    ".config/agents",  # MCP auto-discovery config (mcp.json → ~/.config/agents/mcp.json)
 ]
 
 # Bundle members under this prefix are the knowledge base. The worker unpacks
