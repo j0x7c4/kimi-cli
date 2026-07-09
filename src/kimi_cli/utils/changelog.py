@@ -103,6 +103,13 @@ def format_release_notes(changelog: dict[str, ReleaseEntry], include_lib_changes
     return "\n".join(parts).strip()
 
 
-CHANGELOG = parse_changelog(
-    (Path(__file__).parent.parent / "CHANGELOG.md").read_text(encoding="utf-8")
-)
+try:
+    CHANGELOG = parse_changelog(
+        (Path(__file__).parent.parent / "CHANGELOG.md").read_text(encoding="utf-8")
+    )
+except OSError:
+    # CHANGELOG.md 在部分打包环境（如 sandbox 镜像，符号链接悬空）缺失。
+    # 本模块被 MCP 工具加载链路（ui.shell.prompt → slash → changelog）在 import 期拉起，
+    # 硬读缺失文件会让整个 worker 崩溃（load_mcp_tools 必崩）。缺 changelog 仅影响
+    # /changelog 展示，降级为空即可，绝不能因此炸掉进程。
+    CHANGELOG = {}
