@@ -83,6 +83,23 @@ def _format_entries(entries: list[MemoryEntry], header: str) -> str:
     return "\n".join(lines)
 
 
+def _list_loop_breaker_text(scope: str) -> str:
+    """Forcing output returned when ``list`` is called repeatedly in a row.
+
+    Replaces the (identical, often empty) listing with an explicit instruction so
+    the model breaks the list→empty→list loop and takes a real next step.
+    """
+    return (
+        f"STOP: you already listed your {scope} memory this turn — the result has "
+        "not changed. Do NOT call Memory list again.\n"
+        "Decide now:\n"
+        "- If the user gave you a durable fact to remember (their name, a "
+        "preference, etc.), call Memory `op=add` immediately "
+        "(scope defaults to persistent).\n"
+        "- Otherwise, stop using Memory and answer the user directly."
+    )
+
+
 class Memory(CallableTool2[Params]):
     name: str = NAME
     description: str = _BASE_DESCRIPTION
@@ -98,6 +115,16 @@ class Memory(CallableTool2[Params]):
         # Pg backend writes ai_user_memory + dispatches by owner_id namespace
         # (spec §2.4.2.D: hechun-<bigint> / webui-<uuid>).
         self.__storage_singleton: object | None = None
+        # hechun-fork: consecutive-``list`` circuit breaker state. Some models
+        # spin forever calling ``list`` on empty persistent memory (SIT: StepBegin
+        # 29→30→… all list, all empty, never ``add``). The prompt's "don't repeat
+        # list" text is ignored by such models, so we break the loop at the tool
+        # layer. ``_last_list_scope`` is the scope of the previous list, or None if
+        # the previous Memory op was not a list; ``_consecutive_list_count`` counts
+        # back-to-back identical-scope lists. Any add/update/delete or a scope
+        # change resets both — a single occasional list never trips the breaker.
+        self._last_list_scope: str | None = None
+        self._consecutive_list_count: int = 0
 
     def _storage(self):
         from kimi_cli.storage import build_storage
@@ -129,10 +156,14 @@ class Memory(CallableTool2[Params]):
     @override
     async def __call__(self, params: Params) -> ToolReturnValue:
         op = params.operation
-        if isinstance(op, AddOp):
-            return await self._add(op)
         if isinstance(op, ListOp):
             return await self._list(op)
+        # Any non-list Memory op breaks a run of lists → reset the breaker so a
+        # later occasional list is judged fresh (add/update/delete are progress).
+        self._last_list_scope = None
+        self._consecutive_list_count = 0
+        if isinstance(op, AddOp):
+            return await self._add(op)
         if isinstance(op, UpdateOp):
             return await self._update(op)
         if isinstance(op, DeleteOp):
@@ -277,6 +308,28 @@ class Memory(CallableTool2[Params]):
             pass
 
     async def _list(self, op: ListOp) -> ToolReturnValue:
+        # hechun-fork: circuit-break consecutive identical-scope ``list`` calls.
+        # Some models loop forever on empty persistent memory (list → empty →
+        # list → …, never ``add``). If the PREVIOUS Memory op was already a list
+        # of the SAME scope, this call is the 2nd+ in a row → return a forcing
+        # instruction instead of the (same) listing, so the model must break out
+        # and either ``add`` or answer the user. A single occasional list, or a
+        # list after any add/update/delete (which resets state via __call__), is
+        # judged fresh and lists normally.
+        if self._last_list_scope == op.scope:
+            self._consecutive_list_count += 1
+            logger.info(
+                "[Memory.list] circuit breaker tripped: consecutive list scope={s} "
+                "count={n}",
+                s=op.scope,
+                n=self._consecutive_list_count,
+            )
+            return _ok(output=_list_loop_breaker_text(op.scope), brief="Stop listing")
+
+        # First list (or scope changed): list normally and arm the breaker.
+        self._last_list_scope = op.scope
+        self._consecutive_list_count = 1
+
         sections: list[str] = []
         if op.scope in ("session", "all"):
             sections.append(
