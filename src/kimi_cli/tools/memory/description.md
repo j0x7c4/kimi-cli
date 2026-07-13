@@ -71,15 +71,17 @@ If the user asks you to save something that falls into the categories above,
 ask them what was *surprising* or *non-obvious* about it — that is the part
 worth keeping.
 
-## When to read
+## Reading memory — automatic, no tool call needed
 
-Call `list` at the start of a turn if you need to recall what was previously
-saved, or to confirm a fact before relying on it. The system also injects
-recent persistent entries automatically — duplicate writes are a waste.
+Your existing persistent memory is injected into context automatically at the
+start of the conversation (with each entry's `id`). You do NOT — and cannot —
+call a `list` operation: just read the injected memory already in context. Use
+the `id` shown there for `update` / `delete`. Because memory is already visible,
+never re-add a fact that is already present — duplicate writes are a waste.
 
 ## Operations
 
 - `add(kind, scope, content)` → returns the new entry's `id`
-- `list(scope)` → returns formatted entries (use `scope="all"` for everything)
-- `update(id, content)` → replace the body of an existing entry
-- `delete(id)` → remove an entry by id
+- `update(id, content)` → replace the body of an existing entry (use an `id`
+  from the auto-injected memory)
+- `delete(id)` → remove an entry by id (use an `id` from the auto-injected memory)

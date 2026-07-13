@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field
 from kimi_cli.memory import (
     MemoryEntry,
     delete_entry,
-    read_entries,
     update_entry,
 )
 from kimi_cli.memory.paths import ANONYMOUS_USER_SENTINEL
@@ -22,7 +21,6 @@ NAME = "Memory"
 
 _BASE_DESCRIPTION = load_desc(Path(__file__).parent / "description.md")
 
-ListScope = Literal["session", "persistent", "all"]
 WriteScope = Literal["session", "persistent"]
 EntryKind = Literal["user", "feedback", "project", "reference"]
 
@@ -42,11 +40,6 @@ class AddOp(BaseModel):
     content: str = Field(min_length=1, description="The memory body. Be concise but specific.")
 
 
-class ListOp(BaseModel):
-    op: Literal["list"] = "list"
-    scope: ListScope = Field(default="all", description="Which scope(s) to list.")
-
-
 class UpdateOp(BaseModel):
     op: Literal["update"] = "update"
     id: str = Field(description="The id of the entry to update.")
@@ -59,7 +52,15 @@ class DeleteOp(BaseModel):
 
 
 class Params(BaseModel):
-    operation: AddOp | ListOp | UpdateOp | DeleteOp = Field(
+    # hechun-fork: ``list`` was removed from the Memory tool. Some models spin
+    # forever calling ``op=list`` on empty persistent memory (SIT: 10+ consecutive
+    # lists, never ``add``; even an explicit STOP breaker text was ignored). It is
+    # also redundant: the user's persistent memory is auto-injected into context at
+    # session start by the cross_session_memory dynamic injection (which reads
+    # storage directly via ``alist_user_memory`` — NOT this tool's op), so the model
+    # already sees prior memory (with ids for update/delete) without listing. With
+    # no ``list`` to loop on, the model must ``add`` or answer.
+    operation: AddOp | UpdateOp | DeleteOp = Field(
         discriminator="op",
         description="The memory operation to perform.",
     )
@@ -71,32 +72,6 @@ def _ok(output: str, brief: str) -> ToolReturnValue:
         output=output,
         message="",
         display=[BriefDisplayBlock(text=brief)],
-    )
-
-
-def _format_entries(entries: list[MemoryEntry], header: str) -> str:
-    if not entries:
-        return f"{header}: (empty)"
-    lines = [f"{header}:"]
-    for e in entries:
-        lines.append(e.render())
-    return "\n".join(lines)
-
-
-def _list_loop_breaker_text(scope: str) -> str:
-    """Forcing output returned when ``list`` is called repeatedly in a row.
-
-    Replaces the (identical, often empty) listing with an explicit instruction so
-    the model breaks the list→empty→list loop and takes a real next step.
-    """
-    return (
-        f"STOP: you already listed your {scope} memory this turn — the result has "
-        "not changed. Do NOT call Memory list again.\n"
-        "Decide now:\n"
-        "- If the user gave you a durable fact to remember (their name, a "
-        "preference, etc.), call Memory `op=add` immediately "
-        "(scope defaults to persistent).\n"
-        "- Otherwise, stop using Memory and answer the user directly."
     )
 
 
@@ -115,16 +90,6 @@ class Memory(CallableTool2[Params]):
         # Pg backend writes ai_user_memory + dispatches by owner_id namespace
         # (spec §2.4.2.D: hechun-<bigint> / webui-<uuid>).
         self.__storage_singleton: object | None = None
-        # hechun-fork: consecutive-``list`` circuit breaker state. Some models
-        # spin forever calling ``list`` on empty persistent memory (SIT: StepBegin
-        # 29→30→… all list, all empty, never ``add``). The prompt's "don't repeat
-        # list" text is ignored by such models, so we break the loop at the tool
-        # layer. ``_last_list_scope`` is the scope of the previous list, or None if
-        # the previous Memory op was not a list; ``_consecutive_list_count`` counts
-        # back-to-back identical-scope lists. Any add/update/delete or a scope
-        # change resets both — a single occasional list never trips the breaker.
-        self._last_list_scope: str | None = None
-        self._consecutive_list_count: int = 0
 
     def _storage(self):
         from kimi_cli.storage import build_storage
@@ -156,12 +121,6 @@ class Memory(CallableTool2[Params]):
     @override
     async def __call__(self, params: Params) -> ToolReturnValue:
         op = params.operation
-        if isinstance(op, ListOp):
-            return await self._list(op)
-        # Any non-list Memory op breaks a run of lists → reset the breaker so a
-        # later occasional list is judged fresh (add/update/delete are progress).
-        self._last_list_scope = None
-        self._consecutive_list_count = 0
         if isinstance(op, AddOp):
             return await self._add(op)
         if isinstance(op, UpdateOp):
@@ -306,70 +265,6 @@ class Memory(CallableTool2[Params]):
             # Session id not a UUID (e.g. tests with synthetic ids) — skip
             # the stamp; PgKimoStorage falls back to NULL gracefully.
             pass
-
-    async def _list(self, op: ListOp) -> ToolReturnValue:
-        # hechun-fork: circuit-break consecutive identical-scope ``list`` calls.
-        # Some models loop forever on empty persistent memory (list → empty →
-        # list → …, never ``add``). If the PREVIOUS Memory op was already a list
-        # of the SAME scope, this call is the 2nd+ in a row → return a forcing
-        # instruction instead of the (same) listing, so the model must break out
-        # and either ``add`` or answer the user. A single occasional list, or a
-        # list after any add/update/delete (which resets state via __call__), is
-        # judged fresh and lists normally.
-        if self._last_list_scope == op.scope:
-            self._consecutive_list_count += 1
-            logger.info(
-                "[Memory.list] circuit breaker tripped: consecutive list scope={s} "
-                "count={n}",
-                s=op.scope,
-                n=self._consecutive_list_count,
-            )
-            return _ok(output=_list_loop_breaker_text(op.scope), brief="Stop listing")
-
-        # First list (or scope changed): list normally and arm the breaker.
-        self._last_list_scope = op.scope
-        self._consecutive_list_count = 1
-
-        sections: list[str] = []
-        if op.scope in ("session", "all"):
-            sections.append(
-                _format_entries(
-                    list(self._runtime.session.state.session_memory),
-                    "Session memory",
-                )
-            )
-        if op.scope in ("persistent", "all"):
-            sections.append(
-                _format_entries(await self._list_persistent(), "Persistent memory")
-            )
-        return _ok(output="\n\n".join(sections), brief=f"Listed ({op.scope})")
-
-    async def _list_persistent(self) -> list[MemoryEntry]:
-        """Read persistent memory for the current owner.
-
-        hechun-fork-cci (方案 B): under a DB/remote backend, persistent entries
-        live in ``ai_user_memory`` (RDS), not ``persistent.jsonl`` — reading the
-        file would show nothing. Route through the active storage; the CCI worker
-        delegates to the gateway via the async ``alist_user_memory`` fast-path.
-        File/dev mode keeps reading ``persistent.jsonl``.
-        """
-        backend = (os.environ.get("KIMI_STORAGE_BACKEND") or "file").strip().lower()
-        if backend in ("postgres", "mysql"):
-            owner_id = self._resolve_owner_id()
-            try:
-                storage = self._storage()
-                alist = getattr(storage, "alist_user_memory", None)
-                if inspect.iscoroutinefunction(alist):
-                    return await alist(owner_id)
-                return storage.list_user_memory(owner_id)
-            except Exception as e:
-                logger.error(
-                    "[Memory.list] storage.list_user_memory failed owner_id={oid}: {err}; "
-                    "falling back to file",
-                    oid=owner_id,
-                    err=e,
-                )
-        return read_entries(self._persistent_file)
 
     async def _update(self, op: UpdateOp) -> ToolReturnValue:
         # Try session first (cheaper), then persistent.
