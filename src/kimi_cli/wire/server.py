@@ -778,6 +778,20 @@ class WireServer:
                     case QuestionRequest():
                         self._pending_requests.pop(msg_id, None)
                         request.resolve({})
+                    case MemoryOpRequest():
+                        # hechun-fork-cci (方案 B): a persistent-memory op that is
+                        # still pending at turn end (gateway never replied before
+                        # the turn finished). Resolve it not-ok so the awaiting
+                        # RemoteKimoStorage caller unblocks immediately instead of
+                        # sitting on request.wait() until its own timeout.
+                        self._pending_requests.pop(msg_id, None)
+                        request.resolve(
+                            MemoryOpResult(
+                                request_id=request.id,
+                                ok=False,
+                                error="turn ended before gateway replied",
+                            )
+                        )
                     case HookRequest():
                         self._pending_requests.pop(msg_id, None)
                         request.resolve("allow")

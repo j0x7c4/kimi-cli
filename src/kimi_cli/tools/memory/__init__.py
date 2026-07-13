@@ -9,7 +9,6 @@ from pydantic import BaseModel, Field
 
 from kimi_cli.memory import (
     MemoryEntry,
-    append_entry,
     delete_entry,
     read_entries,
     update_entry,
@@ -163,10 +162,32 @@ class Memory(CallableTool2[Params]):
                 f"Add persistent memory ({op.kind}): {preview}",
             )
             if rejection is not None:
+                # INFO (方案 B 可观测性): persistent add blocked at the approval
+                # gate → the storage/wire path is never reached, so NOTHING lands
+                # in RDS. On headless clients (iOS/Flutter, no approval UI) this is
+                # the top suspect when "记住 X" produces no gateway append: the
+                # session must be yolo/afk (KIMO_DEFAULT_YOLO) for the write to
+                # proceed. Logged so a Pod log makes the cause unambiguous.
+                logger.info(
+                    "[Memory.add] persistent add REJECTED at approval gate "
+                    "(no write to RDS) kind={kind}",
+                    kind=op.kind,
+                )
                 return rejection
 
         entry = MemoryEntry(kind=op.kind, scope=op.scope, content=op.content)
         if op.scope == "session":
+            # INFO (方案 B 可观测性): session-scope adds live only in this turn's
+            # SessionState and are NEVER persisted to ai_user_memory. If a user
+            # said "remember X" but the LLM chose scope=session, this log makes it
+            # obvious why nothing reached the gateway / RDS (a common false alarm
+            # that looks like a broken write path).
+            logger.info(
+                "[Memory.add] session-scope add (NOT persisted to RDS) kind={kind} "
+                "entry_id={eid}",
+                kind=op.kind,
+                eid=entry.id,
+            )
             self._runtime.session.state.session_memory.append(entry)
             self._runtime.session.save_state()
         else:
@@ -188,10 +209,29 @@ class Memory(CallableTool2[Params]):
                 # thread would deadlock on the wire round-trip). Prefer it when
                 # present; every other backend keeps the sync path.
                 aappend = getattr(storage, "aappend_user_memory", None)
-                if inspect.iscoroutinefunction(aappend):
+                is_async = inspect.iscoroutinefunction(aappend)
+                # INFO (方案 B 可观测性): log BEFORE the write so a production Pod
+                # log shows the persistent append actually entered the storage
+                # path (vs. being a session-scope add, or blocked at approval).
+                # Symmetric with the gateway's "[memory-op] gateway appended".
+                logger.info(
+                    "[Memory.add] persistent append start owner_id={oid} kind={kind} "
+                    "storage={st} async={a} entry_id={eid}",
+                    oid=owner_id,
+                    kind=op.kind,
+                    st=type(storage).__name__,
+                    a=is_async,
+                    eid=entry.id,
+                )
+                if is_async:
                     await aappend(owner_id, entry)
                 else:
                     storage.append_user_memory(owner_id, entry)
+                logger.info(
+                    "[Memory.add] persistent append returned owner_id={oid} entry_id={eid}",
+                    oid=owner_id,
+                    eid=entry.id,
+                )
             except Exception as e:
                 # Spec §5.5 hard contract: memory append must NOT block the
                 # LLM stream. Both FileKimoStorage and PgKimoStorage already

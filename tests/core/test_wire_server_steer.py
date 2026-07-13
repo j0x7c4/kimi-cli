@@ -247,3 +247,42 @@ async def test_handle_prompt_cleanup_keeps_background_approval_pending(
     assert runtime.approval_runtime is not None
     record = runtime.approval_runtime.get_request("req-bg-prompt-1")
     assert record is None
+
+
+@pytest.mark.asyncio
+async def test_handle_prompt_cleanup_resolves_pending_memory_op(
+    runtime: Runtime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """方案 B (hechun-fork-cci): a persistent-memory op still pending when the turn
+    ends must be resolved not-ok, so the awaiting RemoteKimoStorage caller unblocks
+    instead of hanging on request.wait() (latent leak — MemoryOpRequest was missing
+    from the _handle_prompt finally-cleanup)."""
+    from kimi_cli.wire.types import MemoryOpRequest, MemoryOpResult
+
+    soul = _make_soul(runtime, tmp_path)
+    server = WireServer(soul)
+
+    request = MemoryOpRequest(id="mem-op-1", op="append", owner_id="hechun-1", entry={})
+    server._pending_requests[request.id] = request
+
+    async def fake_run_soul(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr("kimi_cli.wire.server.run_soul", fake_run_soul)
+
+    response = await server._handle_prompt(
+        JSONRPCPromptMessage(
+            id="prompt-mem-1",
+            params=JSONRPCPromptMessage.Params(user_input=[TextPart(text="hi")]),
+        )
+    )
+
+    assert isinstance(response, JSONRPCSuccessResponse)
+    # The pending memory op is drained and resolved not-ok.
+    assert "mem-op-1" not in server._pending_requests
+    assert request.resolved is True
+    result = await request.wait()
+    assert isinstance(result, MemoryOpResult)
+    assert result.ok is False
