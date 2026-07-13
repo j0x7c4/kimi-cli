@@ -31,9 +31,12 @@ class AddOp(BaseModel):
     op: Literal["add"] = "add"
     kind: EntryKind = Field(description="The category of memory being recorded.")
     scope: WriteScope = Field(
+        default="persistent",
         description=(
-            "`session` keeps the entry in the current conversation only. "
-            "`persistent` writes to the user's cross-session memory."
+            "Defaults to `persistent` — writes to the user's cross-session memory "
+            "(survives across conversations; this is what 'remember me / my X' means). "
+            "Use `session` ONLY for a note relevant just to the current conversation "
+            "(rarely needed). When unsure, omit this field so it defaults to persistent."
         ),
     )
     content: str = Field(min_length=1, description="The memory body. Be concise but specific.")
