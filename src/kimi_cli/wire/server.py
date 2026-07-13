@@ -390,6 +390,28 @@ class WireServer:
         self, msg: JSONRPCInitializeMessage
     ) -> JSONRPCSuccessResponse | JSONRPCErrorResponse:
         if self._is_streaming:
+            # hechun fork: an ``initialize`` that races with an in-flight turn used
+            # to be rejected wholesale. That dropped the capability handshake on the
+            # floor — e.g. a gateway replaying initialize just as a prompt started
+            # streaming would leave AskUserQuestion hidden for the whole turn. The
+            # full re-init (external-tool / hook (re)registration) is genuinely
+            # unsafe mid-turn, so we still refuse THAT. But the capability +
+            # tool-visibility subset is idempotent and cheap, so apply it in place so
+            # question / plan-mode tools become available for the remainder of the
+            # turn instead of being silently suppressed.
+            if msg.params.capabilities is not None:
+                self._client_supports_question = msg.params.capabilities.supports_question
+                self._client_supports_plan_mode = msg.params.capabilities.supports_plan_mode
+                if isinstance(self._soul, KimiSoul) and isinstance(
+                    self._soul.agent.toolset, KimiToolset
+                ):
+                    self._sync_ask_user_tool_visibility(self._soul.agent.toolset)
+                    self._sync_plan_mode_tool_visibility(self._soul.agent.toolset)
+                logger.info(
+                    "initialize received during active turn — applied capabilities "
+                    "(supports_question={q}) without full re-init",
+                    q=self._client_supports_question,
+                )
             return JSONRPCErrorResponse(
                 id=msg.id,
                 error=JSONRPCErrorObject(

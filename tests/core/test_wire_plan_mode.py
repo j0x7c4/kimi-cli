@@ -76,3 +76,53 @@ class TestSyncPlanModeToolVisibility:
         server._sync_plan_mode_tool_visibility(ts)
         assert "ExitPlanMode" in {t.name for t in ts.tools}
         assert "EnterPlanMode" in {t.name for t in ts.tools}
+
+
+class TestSyncAskUserToolVisibility:
+    """hechun fork: AskUserQuestion visibility must track the client's
+    supports_question capability — the handshake the CCI gateway now replays
+    across worker restarts."""
+
+    def _make_toolset_with_ask_user(self) -> KimiToolset:
+        from kimi_cli.tools.ask_user import AskUserQuestion
+
+        ts = KimiToolset()
+        ts.add(AskUserQuestion())
+        return ts
+
+    def _make_server(self, supports_question: bool):
+        from kimi_cli.wire.server import WireServer
+
+        server = WireServer.__new__(WireServer)
+        server._soul = MagicMock()
+        server._client_supports_question = supports_question
+        return server
+
+    def test_ask_user_hidden_when_unsupported(self) -> None:
+        from kimi_cli.tools.ask_user import NAME as ASK_USER
+
+        ts = self._make_toolset_with_ask_user()
+        server = self._make_server(supports_question=False)
+        server._sync_ask_user_tool_visibility(ts)
+        assert ASK_USER not in {t.name for t in ts.tools}
+
+    def test_ask_user_visible_when_supported(self) -> None:
+        from kimi_cli.tools.ask_user import NAME as ASK_USER
+
+        ts = self._make_toolset_with_ask_user()
+        server = self._make_server(supports_question=True)
+        server._sync_ask_user_tool_visibility(ts)
+        assert ASK_USER in {t.name for t in ts.tools}
+
+    def test_unhide_after_hide(self) -> None:
+        from kimi_cli.tools.ask_user import NAME as ASK_USER
+
+        ts = self._make_toolset_with_ask_user()
+        server = self._make_server(supports_question=False)
+        server._sync_ask_user_tool_visibility(ts)
+        assert ASK_USER not in {t.name for t in ts.tools}
+
+        # Simulate a replayed initialize declaring supports_question=True.
+        server._client_supports_question = True
+        server._sync_ask_user_tool_visibility(ts)
+        assert ASK_USER in {t.name for t in ts.tools}

@@ -480,3 +480,155 @@ class TestAgentLoadFailureExitCode:
         await proc._read_task
 
         assert spawner.metrics.agent_load_failures == []
+
+
+class _MultiStreamSpawner:
+    """Spawner that hands out a FRESH FakeExecStream on each spawn.
+
+    Needed for restart tests: after ``stop_worker`` closes the first stream
+    (EOF), a second ``start`` must attach to a brand-new worker. The single-stream
+    FakeSpawner can't model that (its one stream is already at EOF).
+    """
+
+    def __init__(self) -> None:
+        self.streams: list[FakeExecStream] = []
+        self.spawned: list = []
+        self.stopped: list = []
+
+    async def spawn(self, sid, owner_id, env) -> SandboxHandle:
+        self.spawned.append((sid, owner_id, env))
+        return SandboxHandle(backend="cci", handle_id=f"kimo-sandbox-{sid}-{len(self.spawned)}")
+
+    async def attach(self, handle: SandboxHandle):
+        stream = FakeExecStream(stdout_lines=[])
+        self.streams.append(stream)
+        return stream
+
+    async def stop(self, handle: SandboxHandle) -> None:
+        self.stopped.append(handle.handle_id)
+
+    async def healthcheck(self, handle: SandboxHandle) -> bool:
+        return True
+
+
+def _make_multistream_proc(monkeypatch: pytest.MonkeyPatch):
+    import kimi_cli.web.runner.cci_process as cci_mod
+
+    monkeypatch.setattr(cci_mod, "KimoExecStream", FakeExecStream)
+    monkeypatch.setattr(cci_mod, "_read_owner_id_from_disk", lambda sid: "hechun-1")
+    monkeypatch.setattr(cci_mod, "_read_agent_name_from_disk", lambda sid: None)
+    monkeypatch.setattr(cci_mod, "get_clean_env", lambda: {})
+    spawner = _MultiStreamSpawner()
+    proc = CCISessionProcess(uuid4(), spawner=spawner)
+    return proc, spawner
+
+
+_INIT_FRAME = json.dumps(
+    {
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "id": "init-1",
+        "params": {
+            "protocol_version": "1",
+            "capabilities": {"supports_question": True, "supports_plan_mode": True},
+        },
+    }
+)
+
+
+class TestInitializeReplayAcrossRestart:
+    """hechun-fork-cci: the gateway remembers the client's ``initialize`` frame and
+    replays it as the FIRST thing written to every freshly-spawned worker, so the
+    AskUserQuestion capability handshake survives CCI Pod restarts (~every 6 min)."""
+
+    async def test_initialize_frame_remembered_and_not_double_sent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        proc, _ = _make_multistream_proc(monkeypatch)
+
+        async def noop(_m) -> None:
+            return None
+
+        monkeypatch.setattr(proc, "_broadcast", noop)
+
+        # First-ever frame is the initialize → worker spawns, frame flows through
+        # normally exactly ONCE (no replay double-send on its own spawn).
+        await proc.send_message(_INIT_FRAME)
+
+        assert proc._last_initialize_frame == _INIT_FRAME
+        stream = proc._exec_stream
+        assert stream is not None
+        assert len(stream.stdin) == 1  # single copy of initialize reached the worker
+        assert json.loads(stream.stdin[0].decode())["method"] == "initialize"
+        await proc.stop_worker()
+
+    async def test_initialize_replayed_before_prompt_on_restart(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        proc, spawner = _make_multistream_proc(monkeypatch)
+
+        async def noop(_m) -> None:
+            return None
+
+        monkeypatch.setattr(proc, "_broadcast", noop)
+
+        async def _no_uploads():
+            return
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(proc, "_encode_uploaded_files", _no_uploads)
+
+        # 1) Client declares capabilities on the first worker.
+        await proc.send_message(_INIT_FRAME)
+        first_stream = proc._exec_stream
+        assert first_stream is not None
+
+        # 2) CCI recycles the Pod: worker dies, gateway tears it down.
+        await proc.stop_worker()
+        assert proc.is_alive is False
+
+        # 3) A new prompt arrives → gateway spawns a FRESH worker. The remembered
+        #    initialize MUST be written before the prompt.
+        prompt = json.dumps(
+            {"jsonrpc": "2.0", "method": "prompt", "id": "p1", "params": {"user_input": "hi"}}
+        )
+        await proc.send_message(prompt)
+
+        new_stream = proc._exec_stream
+        assert new_stream is not None
+        assert new_stream is not first_stream  # genuinely a new worker
+        # First frame on the new worker is the initialize, second is the prompt.
+        assert len(new_stream.stdin) == 2
+        first = json.loads(new_stream.stdin[0].decode())
+        second = json.loads(new_stream.stdin[1].decode())
+        assert first["method"] == "initialize"
+        assert first["params"]["capabilities"]["supports_question"] is True
+        assert second["method"] == "prompt"
+        await proc.stop_worker()
+
+    async def test_no_replay_without_prior_initialize(self, monkeypatch: pytest.MonkeyPatch):
+        # If the gateway never saw an initialize, a fresh worker gets only the prompt
+        # (upstream behaviour preserved — no phantom initialize).
+        proc, _ = _make_multistream_proc(monkeypatch)
+
+        async def noop(_m) -> None:
+            return None
+
+        monkeypatch.setattr(proc, "_broadcast", noop)
+
+        async def _no_uploads():
+            return
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(proc, "_encode_uploaded_files", _no_uploads)
+
+        prompt = json.dumps(
+            {"jsonrpc": "2.0", "method": "prompt", "id": "p1", "params": {"user_input": "hi"}}
+        )
+        await proc.send_message(prompt)
+
+        stream = proc._exec_stream
+        assert stream is not None
+        assert len(stream.stdin) == 1
+        assert json.loads(stream.stdin[0].decode())["method"] == "prompt"
+        await proc.stop_worker()

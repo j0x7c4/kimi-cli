@@ -263,6 +263,13 @@ class CCISessionProcess(SessionProcess):
             self._exec_stream = stream
 
             self._read_task = asyncio.create_task(self._read_loop())
+            # hechun-fork-cci: a fresh Pod worker was just spawned (this happens
+            # every few minutes as CCI recycles the Pod / drops the exec stream).
+            # Re-declare the client's capabilities to it FIRST — before any prompt —
+            # so AskUserQuestion / plan-mode survive the restart. No-op until the
+            # gateway has forwarded an initialize frame. This is THE fix for the
+            # capability handshake not sticking across CCI worker respawns.
+            await self._replay_initialize_to_worker()
             if restart_started_at is not None:
                 elapsed_ms = int((time.perf_counter() - restart_started_at) * 1000)
                 detail = f"restart_ms={elapsed_ms}"

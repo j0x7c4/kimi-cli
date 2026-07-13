@@ -59,6 +59,21 @@ from kimi_cli.wire.serde import deserialize_wire_message
 JSONRPCOutMessageAdapter = TypeAdapter[JSONRPCOutMessage](JSONRPCOutMessage)
 
 
+def _is_initialize_frame(message: str) -> bool:
+    """Cheap check whether a raw JSON-RPC frame is an ``initialize`` request.
+
+    hechun-fork-cci. Used by :meth:`SessionProcess.send_message` to remember the
+    client's capability handshake so it can be replayed to workers that restart.
+    Tolerates malformed input (returns False) — the full validation happens later
+    in ``send_message`` for frames we actually act on.
+    """
+    try:
+        obj = json.loads(message)
+    except (ValueError, TypeError):
+        return False
+    return isinstance(obj, dict) and obj.get("method") == "initialize"
+
+
 class SessionProcess:
     """Manages a single session's KimiCLI subprocess.
 
@@ -107,7 +122,21 @@ class SessionProcess:
         self._lock = asyncio.Lock()
         self._ws_lock = asyncio.Lock()
         self._sent_files: set[str] = set()
-        # hechun-fork-cci: monotonic timestamp of the last activity on this session
+        # hechun-fork-cci: the last ``initialize`` frame the gateway forwarded for
+        # this session, verbatim (already newline-free JSON string). The gateway is
+        # otherwise a stateless byte-pipe for wire frames — it does NOT synthesize
+        # ``initialize`` itself; the backend sends it over the WebSocket. But a CCI
+        # worker restarts every few minutes (Pod recycle / exec drop) and each fresh
+        # worker boots with ``_initialized=False`` / ``_client_supports_question=False``,
+        # so capability-gated tools (AskUserQuestion, plan mode) stay HIDDEN unless
+        # the client re-declares. Relying on the backend to re-send initialize on
+        # every restart is racy: if a prompt reaches the new worker first it starts a
+        # turn and the later initialize is rejected with "An agent turn is already in
+        # progress" (wire/server.py). So we remember the frame here and re-inject it
+        # as the FIRST thing written to every freshly-spawned worker, before any
+        # prompt — order-guaranteed and restart-proof, independent of backend timing.
+        self._last_initialize_frame: str | None = None
+        # monotonic timestamp of the last activity on this session
         # (worker start / prompt sent / busy transition). The CCI idle sweeper
         # (web/app.py) reclaims sessions whose worker is alive but idle past
         # KIMI_CCI_IDLE_TTL_SECONDS. Harmless on docker/local (just a timestamp,
@@ -244,6 +273,10 @@ class SessionProcess:
             )
 
             self._read_task = asyncio.create_task(self._read_loop())
+            # hechun-fork-cci: a fresh worker was just spawned. Re-declare the client's
+            # capabilities to it FIRST (before any prompt) so capability-gated tools
+            # survive worker restarts. No-op until an initialize frame has been seen.
+            await self._replay_initialize_to_worker()
             if restart_started_at is not None:
                 elapsed_ms = int((time.perf_counter() - restart_started_at) * 1000)
                 detail = f"restart_ms={elapsed_ms}"
@@ -251,6 +284,35 @@ class SessionProcess:
                 await self._emit_restart_notice(reason=reason, restart_ms=elapsed_ms)
             else:
                 await self._emit_status("idle", reason=reason or "start", detail=None)
+
+    async def _replay_initialize_to_worker(self) -> None:
+        """Re-inject the remembered ``initialize`` frame into a freshly-spawned worker.
+
+        hechun-fork-cci. Must be called with ``self._lock`` held, right after a new
+        worker is spawned and its read loop started, and before any prompt can be
+        written. Writes the last ``initialize`` frame the gateway forwarded straight
+        to worker stdin so ``_client_supports_question`` / plan-mode are set (and the
+        AskUserQuestion tool unhidden) on the new worker exactly as they were on the
+        original one. No-op when no initialize has been seen yet (the very first
+        connection, where the backend's own initialize is still in flight and will
+        arrive normally). Best-effort: a transport failure here must not wedge start().
+        """
+        frame = self._last_initialize_frame
+        if frame is None:
+            return
+        try:
+            await self._transport_write_stdin((frame + "\n").encode("utf-8"))
+            logger.info(
+                "Replayed initialize to fresh worker for session {sid} "
+                "(capabilities re-declared)",
+                sid=self.session_id,
+            )
+        except Exception as e:  # noqa: BLE001 — never wedge worker startup
+            logger.warning(
+                "Failed to replay initialize to worker for session {sid}: {err}",
+                sid=self.session_id,
+                err=f"{e.__class__.__name__}: {e}",
+            )
 
     async def stop(self) -> None:
         """Stop the session: terminate worker and close all WebSockets."""
@@ -748,7 +810,19 @@ class SessionProcess:
         # hechun-fork-cci: any inbound message is activity — keep the idle sweeper
         # from reclaiming a session the user is actively driving.
         self._touch_active()
+        # hechun-fork-cci: detect an ``initialize`` frame BEFORE start(). The
+        # capability handshake must survive worker restarts, so we remember the
+        # raw frame. Detection is a cheap top-level method check; we only parse the
+        # full envelope for prompt/cancel handling below. We set
+        # ``_last_initialize_frame`` AFTER start() so start()'s replay does not
+        # double-send this very frame (start() spawns the worker, replay is a no-op
+        # because the field is still None, then this frame flows through normally).
+        is_initialize = _is_initialize_frame(message)
+
         await self.start()
+
+        if is_initialize:
+            self._last_initialize_frame = message
 
         # Handle in message
         try:
