@@ -38,6 +38,7 @@ from kimi_cli.web.api.sandbox_assets import SANDBOX_ASSETS_PATH
 # CCI sandbox sees exactly the same env contract as a docker sandbox.
 from kimi_cli.web.runner.container import (
     _SANDBOX_ENV_VARS,
+    _memory_via_gateway_flag,
     _read_agent_name_from_disk,
     _read_owner_id_from_disk,
 )
@@ -357,6 +358,17 @@ class CCISessionProcess(SessionProcess):
             token = host_env.get("KIMI_WEB_SESSION_TOKEN")
             if token:
                 env["KIMO_SANDBOX_ASSETS_TOKEN"] = token
+
+        # hechun-fork-cci (方案 B): inject KIMO_MEMORY_VIA_GATEWAY (DB mode only) so
+        # the worker delegates persistent memory to the gateway over the wire
+        # instead of connecting to RDS from the Pod (which it cannot reach). This is
+        # gateway-computed, NOT a host-env passthrough — the gateway's own env must
+        # never carry it (else its build_storage() would also pick RemoteKimoStorage
+        # and dead-end). None in file mode → not injected. CCI is always DB mode, so
+        # in practice this is always "1" here; the guard keeps container/CCI parity.
+        via_gateway = _memory_via_gateway_flag()
+        if via_gateway is not None:
+            env["KIMO_MEMORY_VIA_GATEWAY"] = via_gateway
 
         env.update(self._extra_env)
         return env

@@ -120,8 +120,37 @@ class TestStorageSelection:
     def test_file_backend_default(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv("KIMI_STORAGE_BACKEND", raising=False)
         monkeypatch.delenv("KIMI_SPAWNER_BACKEND", raising=False)
+        monkeypatch.delenv("KIMO_MEMORY_VIA_GATEWAY", raising=False)
         storage = build_storage()
         assert type(storage).__name__ == "FileKimoStorage"
+
+    def test_mysql_via_gateway_returns_remote_proxy(self, monkeypatch: pytest.MonkeyPatch):
+        """hechun-fork-cci (方案 B): KIMO_MEMORY_VIA_GATEWAY → RemoteKimoStorage.
+
+        The CCI worker cannot reach RDS, so with the flag set build_storage()
+        must return the wire-delegating proxy — and must NOT need MYSQL_* creds
+        (no DB connection is opened on the worker).
+        """
+        monkeypatch.setenv("KIMI_STORAGE_BACKEND", "mysql")
+        monkeypatch.setenv("KIMO_MEMORY_VIA_GATEWAY", "1")
+        _clear_mysql_env(monkeypatch)  # no MYSQL_* creds at all
+        storage = build_storage()
+        assert type(storage).__name__ == "RemoteKimoStorage"
+
+    def test_mysql_without_gateway_flag_builds_real_storage(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Docker/SIT (flag unset) keeps the direct MyKimoStorage path."""
+        monkeypatch.setenv("KIMI_STORAGE_BACKEND", "mysql")
+        monkeypatch.delenv("KIMO_MEMORY_VIA_GATEWAY", raising=False)
+        _clear_mysql_env(monkeypatch)
+        monkeypatch.setenv("MYSQL_HOST", "rds.internal")
+        monkeypatch.setenv("MYSQL_USER", "hechun")
+        monkeypatch.setenv("MYSQL_PASSWORD", "secret")
+        cap = _capture_mysql_url(monkeypatch)
+        storage = build_storage()
+        assert type(storage).__name__ == "_FakeStorage"
+        assert cap["db_url"].host == "rds.internal"
 
 
 class TestSpawnerSelection:

@@ -629,7 +629,7 @@ def test_wire_message_type_alias():
 
     module = kimi_cli.wire.types
     # Helper types that are BaseModel subclasses but not WireMessage types
-    from kimi_cli.wire.types import HookResponse
+    from kimi_cli.wire.types import HookResponse, MemoryOpResult
 
     _NON_WIRE_TYPES = {
         WireMessageEnvelope,
@@ -639,6 +639,8 @@ def test_wire_message_type_alias():
         QuestionItem,
         QuestionResponse,
         HookResponse,
+        # hechun-fork-cci: result payload for MemoryOpRequest, not a WireMessage.
+        MemoryOpResult,
     }
 
     wire_message_types = {

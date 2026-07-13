@@ -541,6 +541,71 @@ type Event = (
 """Any event, including control flow and content/tooling events."""
 
 
+class MemoryOpResult(BaseModel):
+    """Result payload the gateway returns for a :class:`MemoryOpRequest`.
+
+    hechun-fork: persistent user memory (``ai_user_memory``) is written/read by
+    the *gateway* (which can reach RDS), not by the CCI worker (which cannot).
+    The worker sends a :class:`MemoryOpRequest` over the wire; the gateway
+    intercepts it, runs its local ``KimoStorage``, and answers with this result.
+    """
+
+    request_id: str = ""
+    """The id of the resolved MemoryOpRequest (echoed back for correlation)."""
+    ok: bool = True
+    """Whether the operation succeeded on the gateway side."""
+    entries: list[dict[str, Any]] = Field(default_factory=list)
+    """For ``list`` ops: the serialized ``MemoryEntry`` rows (model_dump json)."""
+    error: str = ""
+    """Human-readable error when ``ok`` is False (op still must not crash worker)."""
+
+
+class MemoryOpRequest(BaseModel):
+    """A persistent-memory operation the worker delegates to the gateway.
+
+    hechun-fork: routed worker→gateway over the same JSON-RPC request channel as
+    :class:`ToolCallRequest`, but the *gateway itself* answers it (it does not
+    relay to the WebSocket client). ``op`` ∈ {``append``, ``list``}. The gateway
+    resolves it against its own ``KimoStorage`` (``MyKimoStorage`` on RDS) and
+    replies with a :class:`MemoryOpResult` in the JSON-RPC ``result`` field.
+    """
+
+    id: str
+    """Unique request id (also used as the JSON-RPC message id)."""
+    op: Literal["append", "list"]
+    """The memory operation to perform on the gateway."""
+    owner_id: str
+    """Resolved owner namespace (``hechun-<bigint>`` / ``webui-<uuid>`` / sentinel)."""
+    entry: dict[str, Any] | None = None
+    """For ``append``: the serialized ``MemoryEntry`` (incl. source_kimo_session_id)."""
+    limit: int = 200
+    """For ``list``: max rows to return."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._future: asyncio.Future[MemoryOpResult] | None = None
+
+    def _get_future(self) -> asyncio.Future[MemoryOpResult]:
+        if self._future is None:
+            self._future = asyncio.get_event_loop().create_future()
+        return self._future
+
+    async def wait(self) -> MemoryOpResult:
+        """Wait for the gateway to resolve this memory operation."""
+        return await self._get_future()
+
+    def resolve(self, result: MemoryOpResult) -> None:
+        """Resolve with the gateway's :class:`MemoryOpResult`."""
+        future = self._get_future()
+        if not future.done():
+            future.set_result(result)
+
+    @property
+    def resolved(self) -> bool:
+        """Whether the request is resolved."""
+        return self._future is not None and self._future.done()
+
+
 class HookResponse(BaseModel):
     """
     Client response to a HookRequest.
@@ -597,7 +662,9 @@ class HookRequest(BaseModel):
         return self._future is not None and self._future.done()
 
 
-type Request = ApprovalRequest | ToolCallRequest | QuestionRequest | HookRequest
+type Request = (
+    ApprovalRequest | ToolCallRequest | QuestionRequest | HookRequest | MemoryOpRequest
+)
 """Any request. Request is a message that expects a response."""
 
 type WireMessage = Event | Request
@@ -693,6 +760,8 @@ __all__ = [
     "QuestionResponse",
     "QuestionRequest",
     "QuestionNotSupported",
+    "MemoryOpRequest",
+    "MemoryOpResult",
     # helpers
     "WireMessageEnvelope",
     # `StatusUpdate`-related

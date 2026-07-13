@@ -171,36 +171,61 @@ def test_build_docker_cmd_omits_assets_env_and_keeps_agent_mount_when_unset(
     assert "/host/agents:/root/.kimi/agents:ro" in cmd
 
 
-def test_sandbox_env_vars_includes_kimo_storage_backend_vars() -> None:
-    """M4 §2.4.2.J: storage backend 切换 env 必须在 _SANDBOX_ENV_VARS 列表里。
-
-    缺任一项都会导致 sandbox 内 PgKimoStorage 拿不到 KIMO_DB_URL，
-    archivist 写 ai_user_memory 静默回落到 file 模式。
+def test_sandbox_env_vars_backend_forwarded_but_db_creds_not() -> None:
+    """方案 B (hechun-fork-cci): KIMI_STORAGE_BACKEND 仍要透传（worker 靠它知道是
+    DB 模式），但 RDS 凭证（KIMO_DB_URL / MYSQL_*）绝不透传 —— 因为 worker 用
+    RemoteKimoStorage 经 wire 委托 gateway 写库，自己不连库、不该拿主库凭证。
     """
     assert "KIMI_STORAGE_BACKEND" in container_mod._SANDBOX_ENV_VARS
-    assert "KIMO_DB_URL" in container_mod._SANDBOX_ENV_VARS
-    assert "KIMO_DB_POOL_SIZE" in container_mod._SANDBOX_ENV_VARS
+    # DB 凭证已从透传白名单删除（B 的安全收益）。
+    for var in (
+        "KIMO_DB_URL",
+        "KIMO_DB_POOL_SIZE",
+        "MYSQL_HOST",
+        "MYSQL_PORT",
+        "MYSQL_DB",
+        "MYSQL_USER",
+        "MYSQL_PASSWORD",
+    ):
+        assert var not in container_mod._SANDBOX_ENV_VARS, f"{var} must not leak"
 
 
-def test_build_docker_cmd_forwards_kimo_storage_env_vars(
+def test_build_docker_cmd_db_mode_injects_flag_and_withholds_creds(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """End-to-end: KIMI_STORAGE_BACKEND/KIMO_DB_URL/POOL_SIZE 到 docker run -e 里。"""
+    """方案 B end-to-end: DB 模式下 docker run -e 里有 KIMI_STORAGE_BACKEND +
+    KIMO_MEMORY_VIA_GATEWAY=1，但没有任何 RDS 凭证。"""
     sid = uuid4()
     monkeypatch.setenv("KIMI_SHARE_DIR", str(tmp_path))
-    monkeypatch.setenv("KIMI_STORAGE_BACKEND", "postgres")
-    monkeypatch.setenv(
-        "KIMO_DB_URL",
-        "postgresql+psycopg2://kimo:pwd@postgres:5432/hechun",
-    )
+    monkeypatch.setenv("KIMI_STORAGE_BACKEND", "mysql")
+    # 即便 gateway env 里有这些凭证，也不能进 sandbox。
+    monkeypatch.setenv("MYSQL_HOST", "rds.internal")
+    monkeypatch.setenv("MYSQL_PASSWORD", "secret")
+    monkeypatch.setenv("KIMO_DB_URL", "mysql+pymysql://u:p@h/hechun")
     monkeypatch.setenv("KIMO_DB_POOL_SIZE", "10")
 
     proc = container_mod.ContainerSessionProcess(sid)
     cmd = proc._build_docker_cmd()
 
-    assert "KIMI_STORAGE_BACKEND=postgres" in cmd
-    assert (
-        "KIMO_DB_URL=postgresql+psycopg2://kimo:pwd@postgres:5432/hechun" in cmd
-    )
-    assert "KIMO_DB_POOL_SIZE=10" in cmd
+    assert "KIMI_STORAGE_BACKEND=mysql" in cmd
+    assert "KIMO_MEMORY_VIA_GATEWAY=1" in cmd
+    # 无任何 RDS 凭证 flag。
+    assert not any(p.startswith("KIMO_DB_URL=") for p in cmd)
+    assert not any(p.startswith("KIMO_DB_POOL_SIZE=") for p in cmd)
+    assert not any(p.startswith("MYSQL_") for p in cmd)
+
+
+def test_build_docker_cmd_file_mode_no_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """file 模式（dev / SIT 本地直连库）不注入 KIMO_MEMORY_VIA_GATEWAY —— 保持原路径。"""
+    sid = uuid4()
+    monkeypatch.setenv("KIMI_SHARE_DIR", str(tmp_path))
+    monkeypatch.setenv("KIMI_STORAGE_BACKEND", "file")
+
+    proc = container_mod.ContainerSessionProcess(sid)
+    cmd = proc._build_docker_cmd()
+
+    assert not any(p.startswith("KIMO_MEMORY_VIA_GATEWAY=") for p in cmd)

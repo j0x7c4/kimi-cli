@@ -25,6 +25,8 @@ from kimi_cli.wire.types import (
     ApprovalResponse,
     HookRequest,
     HookResponse,
+    MemoryOpRequest,
+    MemoryOpResult,
     QuestionNotSupported,
     QuestionRequest,
     QuestionResponse,
@@ -313,6 +315,14 @@ class WireServer:
                     )
                 case QuestionRequest():
                     request.resolve({})
+                case MemoryOpRequest():
+                    request.resolve(
+                        MemoryOpResult(
+                            request_id=request.id,
+                            ok=False,
+                            error="wire closed before gateway replied",
+                        )
+                    )
                 case HookRequest():
                     request.resolve("allow")
         self._pending_requests.clear()
@@ -1014,6 +1024,33 @@ class WireServer:
                         response_id=result.request_id,
                     )
                 request.resolve(result.answers)
+            case MemoryOpRequest():
+                # hechun-fork-cci (方案 B): the gateway ran the persistent-memory
+                # op against RDS and replied. Resolve the tool's waiting future
+                # with the MemoryOpResult. On error / bad payload resolve with a
+                # not-ok result so the worker swallows gracefully (never hangs).
+                if isinstance(msg, JSONRPCErrorResponse):
+                    request.resolve(
+                        MemoryOpResult(
+                            request_id=request.id, ok=False, error=msg.error.message
+                        )
+                    )
+                    return
+                try:
+                    mem_result = MemoryOpResult.model_validate(msg.result)
+                except pydantic.ValidationError as e:
+                    logger.error(
+                        "Invalid memory op result for request id={id}: {error}",
+                        id=msg.id,
+                        error=e,
+                    )
+                    request.resolve(
+                        MemoryOpResult(
+                            request_id=request.id, ok=False, error="invalid result payload"
+                        )
+                    )
+                    return
+                request.resolve(mem_result)
             case HookRequest():
                 if isinstance(msg, JSONRPCErrorResponse):
                     request.resolve("allow")
@@ -1049,6 +1086,8 @@ class WireServer:
                     await self._request_external_tool(msg)
                 case QuestionRequest():
                     await self._request_question(msg)
+                case MemoryOpRequest():
+                    await self._request_memory_op(msg)
                 case HookRequest():
                     pass  # handled via hook engine callbacks
                 case _:
@@ -1069,6 +1108,16 @@ class WireServer:
         self._pending_requests[msg_id] = request
         await self._send_msg(JSONRPCRequestMessage(id=msg_id, params=request))
         # Same rationale as _request_approval: do not block the UI loop.
+
+    async def _request_memory_op(self, request: MemoryOpRequest) -> None:
+        # hechun-fork-cci (方案 B): persistent-memory delegation to the gateway.
+        # Same non-blocking pattern as the other requests — track the pending
+        # request so _handle_response can resolve its future when the gateway
+        # replies with a MemoryOpResult. Unlike ToolCallRequest this is answered
+        # by the gateway itself, not the WebSocket client.
+        msg_id = request.id
+        self._pending_requests[msg_id] = request
+        await self._send_msg(JSONRPCRequestMessage(id=msg_id, params=request))
 
     async def _request_question(self, request: QuestionRequest) -> None:
         if not self._client_supports_question:

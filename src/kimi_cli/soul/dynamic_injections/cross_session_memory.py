@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -59,7 +60,7 @@ class CrossSessionMemoryInjectionProvider(DynamicInjectionProvider):
             # would return empty / stale → LLM has no recall of past sessions.
             # Read via storage abstraction; file path stays as fallback for
             # file-mode + upstream test harnesses.
-            persistent = _read_persistent(user_memory_dir)
+            persistent = await _read_persistent(user_memory_dir)
             recent = read_recent_summaries(
                 user_memory_dir / RECENT_FILENAME,
                 limit=_RECENT_INJECTION_LIMIT,
@@ -76,16 +77,20 @@ class CrossSessionMemoryInjectionProvider(DynamicInjectionProvider):
         return self._cached
 
 
-def _read_persistent(user_memory_dir) -> Sequence[MemoryEntry]:
+async def _read_persistent(user_memory_dir) -> Sequence[MemoryEntry]:
     """Read persistent memory entries — storage-aware (M4 §2.4.2.C/D).
 
     Lookup order:
       1. Active ``KimoStorage.list_user_memory(owner_id)`` when
-         ``KIMI_STORAGE_BACKEND=postgres``; owner_id derived from path:
+         ``KIMI_STORAGE_BACKEND`` ∈ {postgres, mysql}; owner_id derived from path:
          user_memory_dir layout is ``{share}/users/{owner_id}/memory/`` so
          the second-to-last component is the owner_id namespace
          (``hechun-<bigint>`` / ``webui-<uuid>`` / ``__anonymous__``).
       2. File fallback ``persistent.jsonl`` (file mode + upstream).
+
+    hechun-fork-cci (方案 B): under a CCI worker the active storage is a
+    RemoteKimoStorage that delegates the read to the gateway over the wire — an
+    async round-trip, so this helper is async and prefers ``alist_user_memory``.
     """
     import os as _os
 
@@ -100,7 +105,12 @@ def _read_persistent(user_memory_dir) -> Sequence[MemoryEntry]:
             try:
                 from kimi_cli.storage import build_storage
 
-                entries = build_storage().list_user_memory(owner_id)
+                storage = build_storage()
+                alist = getattr(storage, "alist_user_memory", None)
+                if inspect.iscoroutinefunction(alist):
+                    entries = await alist(owner_id)
+                else:
+                    entries = storage.list_user_memory(owner_id)
                 if entries:
                     return entries
             except Exception as _e:  # noqa: BLE001

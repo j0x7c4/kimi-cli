@@ -70,6 +70,21 @@ def build_storage() -> KimoStorage:
     backend = (os.environ.get("KIMI_STORAGE_BACKEND") or "file").strip().lower()
     spawner_backend = (os.environ.get("KIMI_SPAWNER_BACKEND") or "docker").strip().lower()
 
+    # hechun-fork-cci (方案 B): the CCI worker cannot reach RDS, so persistent
+    # user memory is delegated to the gateway over the wire. When the gateway
+    # sets ``KIMO_MEMORY_VIA_GATEWAY`` for a Pod, the worker's storage is a
+    # RemoteKimoStorage proxy (no DB connection). Docker/SIT (worker reaches the
+    # DB directly) and file/dev mode never set this flag → unchanged path.
+    via_gateway = (os.environ.get("KIMO_MEMORY_VIA_GATEWAY") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if backend in ("postgres", "mysql") and via_gateway:
+        from kimi_cli.storage.remote_storage import RemoteKimoStorage
+
+        return RemoteKimoStorage()
+
     if backend in ("postgres", "mysql"):
         pool_size_str = os.environ.get("KIMO_DB_POOL_SIZE", "5")
         try:

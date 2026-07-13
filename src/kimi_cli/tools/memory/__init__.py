@@ -1,3 +1,4 @@
+import inspect
 import json
 import os
 from pathlib import Path
@@ -129,7 +130,7 @@ class Memory(CallableTool2[Params]):
         if isinstance(op, AddOp):
             return await self._add(op)
         if isinstance(op, ListOp):
-            return self._list(op)
+            return await self._list(op)
         if isinstance(op, UpdateOp):
             return await self._update(op)
         if isinstance(op, DeleteOp):
@@ -180,7 +181,17 @@ class Memory(CallableTool2[Params]):
             self._attach_source_session(entry)
             owner_id = self._resolve_owner_id()
             try:
-                self._storage().append_user_memory(owner_id, entry)
+                storage = self._storage()
+                # hechun-fork-cci (方案 B): the CCI worker delegates persistent
+                # memory to the gateway over the wire via RemoteKimoStorage,
+                # which exposes an async fast-path (a sync call on the loop
+                # thread would deadlock on the wire round-trip). Prefer it when
+                # present; every other backend keeps the sync path.
+                aappend = getattr(storage, "aappend_user_memory", None)
+                if inspect.iscoroutinefunction(aappend):
+                    await aappend(owner_id, entry)
+                else:
+                    storage.append_user_memory(owner_id, entry)
             except Exception as e:
                 # Spec §5.5 hard contract: memory append must NOT block the
                 # LLM stream. Both FileKimoStorage and PgKimoStorage already
@@ -222,7 +233,7 @@ class Memory(CallableTool2[Params]):
             # the stamp; PgKimoStorage falls back to NULL gracefully.
             pass
 
-    def _list(self, op: ListOp) -> ToolReturnValue:
+    async def _list(self, op: ListOp) -> ToolReturnValue:
         sections: list[str] = []
         if op.scope in ("session", "all"):
             sections.append(
@@ -233,9 +244,36 @@ class Memory(CallableTool2[Params]):
             )
         if op.scope in ("persistent", "all"):
             sections.append(
-                _format_entries(read_entries(self._persistent_file), "Persistent memory")
+                _format_entries(await self._list_persistent(), "Persistent memory")
             )
         return _ok(output="\n\n".join(sections), brief=f"Listed ({op.scope})")
+
+    async def _list_persistent(self) -> list[MemoryEntry]:
+        """Read persistent memory for the current owner.
+
+        hechun-fork-cci (方案 B): under a DB/remote backend, persistent entries
+        live in ``ai_user_memory`` (RDS), not ``persistent.jsonl`` — reading the
+        file would show nothing. Route through the active storage; the CCI worker
+        delegates to the gateway via the async ``alist_user_memory`` fast-path.
+        File/dev mode keeps reading ``persistent.jsonl``.
+        """
+        backend = (os.environ.get("KIMI_STORAGE_BACKEND") or "file").strip().lower()
+        if backend in ("postgres", "mysql"):
+            owner_id = self._resolve_owner_id()
+            try:
+                storage = self._storage()
+                alist = getattr(storage, "alist_user_memory", None)
+                if inspect.iscoroutinefunction(alist):
+                    return await alist(owner_id)
+                return storage.list_user_memory(owner_id)
+            except Exception as e:
+                logger.error(
+                    "[Memory.list] storage.list_user_memory failed owner_id={oid}: {err}; "
+                    "falling back to file",
+                    oid=owner_id,
+                    err=e,
+                )
+        return read_entries(self._persistent_file)
 
     async def _update(self, op: UpdateOp) -> ToolReturnValue:
         # Try session first (cheaper), then persistent.

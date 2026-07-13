@@ -138,6 +138,31 @@ def _read_agent_name_from_disk(session_id: UUID) -> str | None:
     return None
 
 
+def _memory_via_gateway_flag() -> str | None:
+    """Computed value for ``KIMO_MEMORY_VIA_GATEWAY`` to inject into the sandbox.
+
+    hechun-fork-cci (方案 B): the *worker* delegates persistent user memory to the
+    gateway over the wire (it cannot reach RDS), so its ``build_storage()`` must
+    return a ``RemoteKimoStorage``. That switch is keyed on this flag.
+
+    Crucially this is a **gateway-computed injection**, NOT a host-env passthrough:
+    it must be present ONLY in the sandbox env, never in the gateway's own process
+    env. If the gateway itself saw this flag, *its* ``build_storage()`` would also
+    return a RemoteKimoStorage — which would try to send wire frames to an upstream
+    gateway that doesn't exist (the gateway is the terminus) — a dead end. So we
+    derive the value here from the DB-backend signal and inject it downstream only.
+
+    Returns ``"1"`` when the active storage backend is a DB (mysql/postgres) — i.e.
+    the worker WOULD otherwise try to connect to RDS directly. Returns ``None`` in
+    file mode (dev / SIT local worker that reaches the DB directly) so that path is
+    left untouched.
+    """
+    backend = (os.environ.get("KIMI_STORAGE_BACKEND") or "file").strip().lower()
+    if backend in ("mysql", "postgres"):
+        return "1"
+    return None
+
+
 # Environment variable names to forward into sandbox containers
 _SANDBOX_ENV_VARS = [
     # LLM configuration
@@ -163,18 +188,17 @@ _SANDBOX_ENV_VARS = [
     # （gateway 切 KIMI_STORAGE_BACKEND=postgres 后，sandbox 仍按 file 跑会
     # 导致 archivist 写 ai_user_memory 不生效）。dev 默认 file 模式三个 var
     # 留空 / "file" 也无副作用。
+    # NOTE (hechun-fork-cci 方案 B): KIMI_STORAGE_BACKEND is still forwarded so the
+    # worker knows it is in DB mode (vs file) and selects RemoteKimoStorage. But the
+    # RDS connection details (KIMO_DB_URL + MYSQL_HOST/PORT/DB/USER/PASSWORD) are NO
+    # LONGER forwarded: under 方案 B the worker delegates persistent memory to the
+    # gateway over the wire and never opens a DB connection itself, so it must not
+    # receive the main-DB credentials. The gateway injects KIMO_MEMORY_VIA_GATEWAY=1
+    # (see _memory_via_gateway_flag) so the worker's build_storage() picks the
+    # RemoteKimoStorage proxy instead of MyKimoStorage. KIMO_DB_POOL_SIZE is likewise
+    # dropped (only MyKimoStorage/PgKimoStorage read it). SIT local docker workers can
+    # still reach the DB, but they run in file mode there — no flag, unchanged path.
     "KIMI_STORAGE_BACKEND",
-    "KIMO_DB_URL",
-    "KIMO_DB_POOL_SIZE",
-    # mysql 后端凭证：storage 工厂（storage/__init__.py）在 KIMO_DB_URL 空时从
-    # MYSQL_* 组件经 URL.create 拼库地址（password 特殊字符安全）。不转发这些，
-    # sandbox 内 MyKimoStorage 建不起来 → Memory 工具写 ai_user_memory 静默失败
-    # （archivist/持久记忆不生效）。gateway .env 有这些 → 补进白名单即随 sandbox 下发。
-    "MYSQL_HOST",
-    "MYSQL_PORT",
-    "MYSQL_DB",
-    "MYSQL_USER",
-    "MYSQL_PASSWORD",
     # Feature flags
     "ENABLE_BROWSER",
     "ENABLE_JUPYTER",
@@ -360,6 +384,16 @@ class ContainerSessionProcess(SessionProcess):
             value = os.environ.get(var_name)
             if value is not None:
                 cmd.extend(["-e", f"{var_name}={value}"])
+
+        # hechun-fork-cci (方案 B): inject KIMO_MEMORY_VIA_GATEWAY into the sandbox
+        # (DB mode only) so the worker's build_storage() returns RemoteKimoStorage
+        # and delegates persistent memory to the gateway over the wire. Computed
+        # here (never a host-env passthrough) so the gateway's own env stays free
+        # of it — otherwise the gateway would itself pick RemoteKimoStorage and
+        # have nowhere upstream to forward to. None in file mode → not injected.
+        via_gateway = _memory_via_gateway_flag()
+        if via_gateway is not None:
+            cmd.extend(["-e", f"KIMO_MEMORY_VIA_GATEWAY={via_gateway}"])
 
         # Extra env vars from configuration
         for key, value in self._extra_env.items():

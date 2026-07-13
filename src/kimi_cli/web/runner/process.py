@@ -10,6 +10,7 @@ import json
 import mimetypes
 import os
 import sys
+import threading
 import time
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
@@ -72,6 +73,108 @@ def _is_initialize_frame(message: str) -> bool:
     except (ValueError, TypeError):
         return False
     return isinstance(obj, dict) and obj.get("method") == "initialize"
+
+
+# hechun-fork-cci (方案 B): the gateway answers worker MemoryOpRequests against
+# its own RDS-reachable storage. Built once (lazily), reused across sessions —
+# same MyKimoStorage the app lifespan builds. Guarded by a lock so concurrent
+# sessions don't race two engines into existence.
+_gateway_memory_storage: object | None = None
+_gateway_memory_storage_lock = threading.Lock()
+
+
+def _get_gateway_memory_storage() -> object:
+    """Return the gateway-side KimoStorage for persistent memory (lazy singleton).
+
+    Deliberately calls ``build_storage()`` directly rather than reaching into a
+    FastAPI ``app.state`` (SessionProcess has no app handle). On the gateway
+    ``KIMO_MEMORY_VIA_GATEWAY`` is NOT set, so this yields a real
+    ``MyKimoStorage`` (RDS), never a RemoteKimoStorage.
+    """
+    global _gateway_memory_storage
+    if _gateway_memory_storage is None:
+        with _gateway_memory_storage_lock:
+            if _gateway_memory_storage is None:
+                from kimi_cli.storage import build_storage
+
+                _gateway_memory_storage = build_storage()
+    return _gateway_memory_storage
+
+
+def _run_gateway_memory_op(request: object):
+    """Execute one MemoryOpRequest against the gateway storage (blocking).
+
+    Runs off the event loop (called via ``asyncio.to_thread``). Always returns a
+    :class:`MemoryOpResult` — on error it returns ``ok=False`` rather than
+    raising, so the worker's ``wait()`` always resolves.
+    """
+    from kimi_cli.wire.types import MemoryOpRequest, MemoryOpResult
+
+    assert isinstance(request, MemoryOpRequest)
+    try:
+        storage = _get_gateway_memory_storage()
+    except Exception as e:  # noqa: BLE001
+        logger.error("[memory-op] gateway storage build failed: {err}", err=e)
+        return MemoryOpResult(request_id=request.id, ok=False, error=f"storage init: {e}")
+
+    try:
+        if request.op == "append":
+            if request.entry is None:
+                return MemoryOpResult(
+                    request_id=request.id, ok=False, error="append missing entry payload"
+                )
+            entry = _memory_entry_from_payload(request.entry)
+            storage.append_user_memory(request.owner_id, entry)
+            logger.info(
+                "[memory-op] gateway appended ai_user_memory owner_id={oid} kind={kind}",
+                oid=request.owner_id,
+                kind=entry.kind,
+            )
+            return MemoryOpResult(request_id=request.id, ok=True)
+        if request.op == "list":
+            entries = storage.list_user_memory(request.owner_id, limit=request.limit)
+            logger.info(
+                "[memory-op] gateway listed {n} ai_user_memory rows owner_id={oid}",
+                n=len(entries),
+                oid=request.owner_id,
+            )
+            return MemoryOpResult(
+                request_id=request.id,
+                ok=True,
+                entries=[json.loads(e.model_dump_json()) for e in entries],
+            )
+        return MemoryOpResult(
+            request_id=request.id, ok=False, error=f"unknown op {request.op!r}"
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(
+            "[memory-op] gateway op={op} failed owner_id={oid}: {err}",
+            op=request.op,
+            oid=request.owner_id,
+            err=e,
+        )
+        return MemoryOpResult(request_id=request.id, ok=False, error=str(e))
+
+
+def _memory_entry_from_payload(payload: dict):
+    """Rebuild a MemoryEntry and re-stamp source_kimo_session_id (setattr field).
+
+    ``source_kimo_session_id`` is not a MemoryEntry model field (the Memory tool
+    stores it via ``object.__setattr__``); the worker put it in the JSON payload,
+    so we pop it and re-stamp it here so ``MyKimoStorage.append_user_memory`` can
+    populate ``ai_user_memory.source_kimo_session_id``.
+    """
+    from uuid import UUID
+
+    from kimi_cli.memory.entry import MemoryEntry
+
+    data = dict(payload)
+    src = data.pop("source_kimo_session_id", None)
+    entry = MemoryEntry.model_validate(data)
+    if src:
+        with contextlib.suppress(ValueError, TypeError):
+            object.__setattr__(entry, "source_kimo_session_id", UUID(str(src)))
+    return entry
 
 
 class SessionProcess:
@@ -539,8 +642,54 @@ class SessionProcess:
                     self._in_flight_prompt_ids.remove(message.id)
                 if was_busy and not self.is_busy:
                     await self._emit_status("idle", reason="prompt_error")
+            case JSONRPCRequestMessage():
+                # hechun-fork-cci (方案 B): the CCI worker cannot reach RDS, so it
+                # delegates persistent-memory writes/reads to us (the gateway,
+                # which CAN reach RDS) over the wire. We answer MemoryOpRequest
+                # ourselves — it is NOT relayed to the WebSocket client (the raw
+                # frame was already broadcast in _read_loop, but no client
+                # responds to it; we own the response). All other request types
+                # (ToolCallRequest, ApprovalRequest, ...) are handled by the
+                # WebSocket client as before.
+                from kimi_cli.wire.types import MemoryOpRequest
+
+                if isinstance(message.params, MemoryOpRequest):
+                    await self._handle_memory_op_request(message.params)
             case _:
                 return
+
+    async def _handle_memory_op_request(self, request: object) -> None:
+        """Resolve a worker MemoryOpRequest against the gateway's own storage.
+
+        hechun-fork-cci (方案 B): the gateway (on ECS) can reach RDS, so it runs
+        the ``append`` / ``list`` against its ``MyKimoStorage`` and writes a
+        JSON-RPC success response back to the worker's stdin. The blocking
+        sqlalchemy call runs off the event loop. Failures still produce a
+        (soft) response so the worker's ``wait()`` never hangs — the worker
+        swallows the error (spec §5.5).
+        """
+        from kimi_cli.wire.types import MemoryOpRequest, MemoryOpResult
+
+        assert isinstance(request, MemoryOpRequest)
+        result = await asyncio.to_thread(_run_gateway_memory_op, request)
+        # Reply as a JSON-RPC success response keyed by the request id; the
+        # worker's wire server (_handle_response) resolves the pending
+        # MemoryOpRequest future with this MemoryOpResult.
+        response = JSONRPCSuccessResponse(
+            id=request.id,
+            result=result.model_dump(mode="json"),
+        )
+        try:
+            await self._transport_write_stdin(
+                (response.model_dump_json() + "\n").encode("utf-8")
+            )
+        except Exception as e:  # noqa: BLE001 — never crash the read loop
+            logger.error(
+                "[memory-op] failed to write response to worker stdin id={id}: {err}",
+                id=request.id,
+                err=e,
+            )
+        _ = MemoryOpResult  # keep import referenced for readers
 
     async def _encode_uploaded_files(self) -> AsyncGenerator[ContentPart]:
         """Encode uploaded files for sending to the model."""
