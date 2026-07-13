@@ -166,6 +166,15 @@ _SANDBOX_ENV_VARS = [
     "KIMI_STORAGE_BACKEND",
     "KIMO_DB_URL",
     "KIMO_DB_POOL_SIZE",
+    # mysql 后端凭证：storage 工厂（storage/__init__.py）在 KIMO_DB_URL 空时从
+    # MYSQL_* 组件经 URL.create 拼库地址（password 特殊字符安全）。不转发这些，
+    # sandbox 内 MyKimoStorage 建不起来 → Memory 工具写 ai_user_memory 静默失败
+    # （archivist/持久记忆不生效）。gateway .env 有这些 → 补进白名单即随 sandbox 下发。
+    "MYSQL_HOST",
+    "MYSQL_PORT",
+    "MYSQL_DB",
+    "MYSQL_USER",
+    "MYSQL_PASSWORD",
     # Feature flags
     "ENABLE_BROWSER",
     "ENABLE_JUPYTER",
