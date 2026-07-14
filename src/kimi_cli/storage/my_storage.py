@@ -7,9 +7,11 @@ MySQL, design ``2026-06-11-pg-to-mysql-migration-design.md``). Selected when
 ``KIMI_STORAGE_BACKEND=mysql`` + ``KIMO_DB_URL=mysql+pymysql://...``. Under the CCI
 spawner there is NO file fallback (Pod has no persistent volume — spec §8.3).
 
-Schema is owned by backend Flyway ``V1__init_mysql.sql`` §13 — kimo never creates
-or migrates tables, only reads/writes. Authoritative shape (verified against the
-backend SQL, lines 712-767):
+Schema is owned by backend Flyway (``V1__init_mysql.sql`` §13 baseline +
+``V13__ai_user_memory_autoincrement.sql`` which补 ``ai_user_memory.id`` 的
+AUTO_INCREMENT — 之前缺失导致本 storage 不传 id 时 MySQL 落 0、第二条起撞主键)
+— kimo never creates or migrates tables, only reads/writes. Authoritative shape
+(verified against the backend SQL, lines 712-767):
 
     kimo_session_state(
         kimo_session_id CHAR(36)     PRIMARY KEY,   -- UUID, no Snowflake
@@ -19,7 +21,7 @@ backend SQL, lines 712-767):
         updated_at      DATETIME(6)  NOT NULL)       -- UTC; no DB ON UPDATE → set in app
 
     ai_user_memory(
-        id                     BIGINT PRIMARY KEY,   -- Snowflake (backend-owned id space)
+        id                     BIGINT PRIMARY KEY AUTO_INCREMENT,  -- DB 自增（不传 id）
         user_id                BIGINT,               -- nullable (V30)
         owner_id               VARCHAR(128),
         source_kimo_session_id CHAR(36),             -- nullable
