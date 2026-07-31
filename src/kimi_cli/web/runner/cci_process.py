@@ -71,6 +71,11 @@ class CCISessionProcess(SessionProcess):
         self._extra_env = extra_env or {}
         self._handle: SandboxHandle | None = None
         self._exec_stream: KimoExecStream | None = None
+        # 冷启动分段计时（仅诊断日志，不影响任何行为）。start() 的冷启动路径填入
+        # (T0 spawn 前, T1 spawn 返回=pod Running+IP, T2 attach 返回)；read-loop 收到
+        # worker 首行 stdout 时补 T3 并打一行汇总。热复用（start 提前返回）不填、不打。
+        self._cold_start_marks: tuple[float, float, float] | None = None
+        self._cold_start_timing_pending: bool = False
 
     @property
     def handle(self) -> SandboxHandle | None:
@@ -81,7 +86,37 @@ class CCISessionProcess(SessionProcess):
 
     async def _transport_read_stdout_line(self) -> bytes:
         assert self._exec_stream is not None
-        return await self._exec_stream.readline()
+        line = await self._exec_stream.readline()
+        # 冷启动整块加载耗时锚点：read-loop 首次拿到 worker 非空 stdout 行 = wire server
+        # 起来 = 容器内 bundle/agent/MCP/知识库加载就绪。⚠️ 不能用 cci_process 在 attach 后
+        # 立即 emit 的 idle 当就绪锚点（早于 worker 真就绪），必须用「首行 stdout」。
+        if self._cold_start_timing_pending and line:
+            self._log_cold_start_timing()
+        return line
+
+    def _log_cold_start_timing(self) -> None:
+        """冷启动首就绪时打一行分段耗时汇总（gateway stdout 可 grep）。计时 exception-safe：
+        任何异常都吞掉、绝不影响 read-loop。热复用不会走到这里（pending 仅冷启动置 True）。
+        """
+        # 先落 pending，确保即便日志抛异常也不会每行都重试。
+        self._cold_start_timing_pending = False
+        try:
+            marks = self._cold_start_marks
+            if marks is None:
+                return
+            t0, t1, t2 = marks
+            t3 = time.perf_counter()
+            logger.info(
+                "[kimo][timing] sid={sid} cci_spawn={spawn}ms attach={attach}ms "
+                "worker_load={load}ms total_to_ready={total}ms",
+                sid=self.session_id,
+                spawn=int((t1 - t0) * 1000),
+                attach=int((t2 - t1) * 1000),
+                load=int((t3 - t2) * 1000),
+                total=int((t3 - t0) * 1000),
+            )
+        except Exception:  # noqa: BLE001 — 计时/日志绝不能弄崩 read-loop
+            pass
 
     def _transport_stdout_at_eof(self) -> bool:
         return self._exec_stream is None or self._exec_stream.at_eof()
@@ -253,15 +288,23 @@ class CCISessionProcess(SessionProcess):
 
             env = self._build_sandbox_env()
 
+            # 冷启动分段计时锚点 T0（spawn 前）。perf_counter 不抛，纯诊断，不改任何行为。
+            _timing_t0 = time.perf_counter()
+
             logger.info(
                 "Spawning CCI sandbox for session {sid}", sid=self.session_id
             )
             self._handle = await self._spawner.spawn(
                 self.session_id, env.get("KIMI_USER_ID", ""), env
             )
+            _timing_t1 = time.perf_counter()  # spawn 返回：pod Running + podIP
             stream = await self._spawner.attach(self._handle)
             assert isinstance(stream, KimoExecStream)
             self._exec_stream = stream
+            _timing_t2 = time.perf_counter()  # attach 返回：exec WS 握手完成
+            # 交给 read-loop：收到 worker 首行 stdout 时补 T3 打汇总（_log_cold_start_timing）。
+            self._cold_start_marks = (_timing_t0, _timing_t1, _timing_t2)
+            self._cold_start_timing_pending = True
 
             self._read_task = asyncio.create_task(self._read_loop())
             # hechun-fork-cci: a fresh Pod worker was just spawned (this happens
