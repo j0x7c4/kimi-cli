@@ -68,6 +68,7 @@ from kimi_cli.soul.dynamic_injections.session_memory import SessionMemoryInjecti
 from kimi_cli.soul.message import (
     check_message,
     sanitize_image_parts,
+    strip_stale_reasoning,
     system,
     system_reminder,
     tool_result_to_message,
@@ -997,6 +998,14 @@ class KimiSoul:
 
         # Normalize: merge adjacent user messages for clean API input
         effective_history = normalize_history(self._context.history)
+        # Drop reasoning from already-completed turns before it reaches the chat
+        # provider. Both the kimi/openai_legacy providers replay a historical
+        # ThinkPart back into reasoning_content; feeding a finished turn's
+        # reasoning into a later request makes some reasoning models degenerate
+        # (stream never reaches finish_reason:stop with text) so a reused
+        # session's follow-up turn never terminates. Reasoning of the current
+        # in-flight turn (after the last user message) is preserved.
+        effective_history = strip_stale_reasoning(effective_history)
         # Last-line defence: strip any image MIME (HEIC/HEIF/AVIF/...) that
         # vision LLMs reject. Operates on a copy — history keeps the original
         # so the UI continues to show what the user uploaded.

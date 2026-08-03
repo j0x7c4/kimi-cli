@@ -168,6 +168,46 @@ def _sanitize_part(part: ContentPart) -> ContentPart:
     return TextPart(text=f"[image attachment removed: unsupported format {mime}]")
 
 
+def strip_stale_reasoning(messages: Sequence[Message]) -> list[Message]:
+    """Return a copy of ``messages`` with completed-turn reasoning removed.
+
+    Assistant ``ThinkPart`` content that belongs to an already-finished turn (any
+    assistant message positioned *before* the last ``user`` message) is dropped
+    before the history is handed to the chat provider. Reasoning produced within
+    the current in-flight turn — assistant / tool-continuation messages *after*
+    the last user message — is preserved untouched, so provider-side within-turn
+    preserved-thinking (e.g. Moonshot ``thinking.keep``) still works.
+
+    Why: both the ``kimi`` and ``openai_legacy`` providers re-serialize a
+    historical ``ThinkPart`` back into the request's ``reasoning_content`` field.
+    Replaying a completed turn's reasoning into a later request makes some
+    reasoning models (e.g. deepseek-v4-flash via litellm) degenerate — the stream
+    never reaches a clean ``finish_reason: stop`` with visible text, so the turn
+    never terminates. Dropping stale cross-turn reasoning removes the trigger.
+
+    The originals (and the conversation history they live in) are not mutated;
+    callers should pass the returned copy to the chat provider while keeping the
+    full history for UI display and persistence.
+    """
+    last_user_idx = -1
+    for idx, msg in enumerate(messages):
+        if msg.role == "user":
+            last_user_idx = idx
+
+    stripped: list[Message] = []
+    for idx, msg in enumerate(messages):
+        if (
+            idx < last_user_idx
+            and msg.role == "assistant"
+            and any(isinstance(part, ThinkPart) for part in msg.content)
+        ):
+            kept = [part for part in msg.content if not isinstance(part, ThinkPart)]
+            stripped.append(msg.model_copy(update={"content": kept}))
+        else:
+            stripped.append(msg)
+    return stripped
+
+
 def sanitize_image_parts(messages: Sequence[Message]) -> list[Message]:
     """Return a copy of ``messages`` with non-LLM-safe image parts replaced.
 
