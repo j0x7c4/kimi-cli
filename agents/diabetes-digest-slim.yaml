@@ -1,0 +1,31 @@
+version: 1
+agent:
+  # 血糖记录页「全天血糖 AI 解读」(digest) 专用瘦身 agent。
+  # 派生自 diabetes-expert，差异见 diabetes-digest-slim-system.md 头注与本 yaml 注释。
+  # 仅供 digest 一次性解读 + 追问场景；主会话/通用咨询继续用 diabetes-expert，勿混用。
+  name: diabetes-digest-slim
+  when_to_use: >
+    血糖记录页「全天血糖 AI 解读」(digest) 专用：读取当天 CGM 曲线 + 事件（餐/运动/用药/胰岛素），
+    一次性给出「全天解读 / 改进建议 / 事件解读」三段，并支持基于当天数据的追问。
+    非通用糖尿病咨询入口（通用走 diabetes-expert）。
+  system_prompt_path: ./diabetes-digest-slim-system.md
+  system_prompt_args:
+    PERSONA_NAME: 小淳
+    DISCLAIMER: |
+      本助手提供的所有分析和建议**仅作为教育性参考信息**，不能替代执业医师、内分泌专科医生或糖尿病教育者的专业诊疗建议。
+      胰岛素剂量的调整涉及用药安全，**任何参数变更必须在医疗专业人员指导下进行**。
+      如果出现严重高血糖（血糖 > 13.9 mmol/L 伴酮症症状）或严重低血糖（意识模糊、无法自行进食），应立即就医或拨打急救电话。
+  tools:
+    - "kimi_cli.tools.ask_user:AskUserQuestion"
+    - "kimi_cli.tools.todo:SetTodoList"
+    - "kimi_cli.tools.file:ReadFile"
+    - "kimi_cli.tools.file:ReadMediaFile"
+    - "kimi_cli.tools.web:SearchWeb"
+    - "kimi_cli.tools.web:FetchURL"
+    # 差异①：不注册 Memory —— digest 为一次性/当日追问，无跨会话建档需求；
+    # 去掉后省下 diabetes-system.md 中约 40 行 Memory 指令 + 会话起始的 persistent-memory 召回注入。
+  subagents: ~
+  allowed_skills: []
+  # 差异②：关闭项目知识库注入 —— digest 解读靠数据 + persona 内建指南知识，
+  # 不检索 wiki；关掉每轮省 ~4822 字符的知识库索引注入。
+  knowledge_base: false
