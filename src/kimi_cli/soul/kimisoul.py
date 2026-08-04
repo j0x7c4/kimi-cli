@@ -953,6 +953,12 @@ class KimiSoul:
         # already checked in `run`
         assert self._runtime.llm is not None
         chat_provider = self._runtime.llm.chat_provider
+        # K3: derive a per-turn provider copy carrying the current turn_id in the
+        # token-accounting metadata. Uses kosong's immutable builder, so the
+        # session-baseline provider (and its thinking key) is untouched.
+        from kimi_cli.llm import apply_request_metadata
+
+        chat_provider = apply_request_metadata(chat_provider, self._runtime.current_turn_id)
 
         if self._runtime.role == "root":
 

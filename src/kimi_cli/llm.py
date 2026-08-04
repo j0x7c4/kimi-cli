@@ -47,6 +47,63 @@ class LLM:
         return self.chat_provider.model_name
 
 
+_HECHUN_OWNER_PREFIX = "hechun-"
+
+
+def _feature_from_subagent() -> str:
+    """Map the ``SUBAGENT`` env var to an accounting ``feature`` (K2).
+
+    hechun/avocado forwards ``SUBAGENT`` into the sandbox container. The digest
+    (血糖解读) agent name contains "digest" (e.g. ``diabetes-digest-slim``); any
+    other agent (default agent with no SUBAGENT, or ``diabetes-expert``) is
+    treated as chat.
+    """
+    sub = (os.getenv("SUBAGENT") or "").strip().lower()
+    if "digest" in sub:
+        return "digest"
+    return "chat"
+
+
+def build_request_metadata(turn_id: str | None) -> dict[str, str] | None:
+    """Build the litellm request ``metadata`` for token accounting (K1/K2/K3).
+
+    Reads ``KIMI_USER_ID`` (set by the sandbox runner from the session owner_id,
+    shaped like ``hechun-<bigint>``) and strips the ``hechun-`` prefix so the §6
+    collector's ``parseLong(metadata.user_id)`` succeeds (坑①). If no usable
+    user_id can be derived (anonymous / ``webui-<uuid>`` / empty), returns
+    ``None`` so no metadata is injected.
+
+    Args:
+        turn_id: canonical per-turn id; included only when present.
+    """
+    raw = (os.getenv("KIMI_USER_ID") or "").strip()
+    user_id = raw[len(_HECHUN_OWNER_PREFIX) :] if raw.startswith(_HECHUN_OWNER_PREFIX) else raw
+    if not user_id:
+        return None
+    md: dict[str, str] = {"user_id": user_id, "feature": _feature_from_subagent()}
+    if turn_id:
+        md["turn_id"] = turn_id
+    return md
+
+
+def apply_request_metadata(chat_provider: ChatProvider, turn_id: str | None) -> ChatProvider:
+    """Derive a per-request provider copy carrying token-accounting metadata (K3).
+
+    Uses kosong's immutable ``with_extra_body`` builder so the session-baseline
+    provider is never mutated, and the top-level ``metadata`` key is replaced
+    without clobbering sibling keys (e.g. ``thinking``). Providers without
+    ``with_extra_body`` (e.g. anthropic, which injects user_id at construction)
+    are returned unchanged.
+    """
+    md = build_request_metadata(turn_id)
+    if md is None:
+        return chat_provider
+    with_extra_body = getattr(chat_provider, "with_extra_body", None)
+    if with_extra_body is not None:
+        return cast(ChatProvider, with_extra_body({"metadata": md}))
+    return chat_provider
+
+
 def parse_llm_providers_env() -> list[dict[str, Any]] | None:
     """Parse ``LLM_PROVIDERS`` environment variable as a YAML list.
 
@@ -213,6 +270,15 @@ def create_llm(
 
             if gen_kwargs:
                 chat_provider = chat_provider.with_generation_kwargs(**gen_kwargs)
+
+            # K1/K2: baseline token-accounting metadata (user_id + feature, no
+            # turn_id). Guarantees litellm gets user_id+feature even when the
+            # wire turn_id is not delivered (auto-start / old backend); the
+            # per-turn turn_id is layered on in KimiSoul._step via
+            # apply_request_metadata (which replaces the whole `metadata` key).
+            base_md = build_request_metadata(None)
+            if base_md:
+                chat_provider = chat_provider.with_extra_body({"metadata": base_md})
         case "openai_legacy":
             from kosong.contrib.chat_provider.openai_legacy import OpenAILegacy
 

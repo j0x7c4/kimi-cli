@@ -120,6 +120,7 @@ class JSONRPCInitializeMessage(_MessageBase):
 class JSONRPCPromptMessage(_MessageBase):
     class Params(BaseModel):
         user_input: str | list[ContentPart]
+        turn_id: str | None = None  # K3: canonical per-turn id; optional, backward-compatible
 
     method: Literal["prompt"] = "prompt"
     id: str

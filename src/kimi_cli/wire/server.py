@@ -690,6 +690,10 @@ class WireServer:
 
         self._cancel_event = asyncio.Event()
         runtime = self._soul.runtime if isinstance(self._soul, KimiSoul) else None
+        if runtime is not None:
+            # K3: stash the canonical turn_id of this prompt so _step can inject
+            # it into the LLM request metadata. Overwritten each turn.
+            runtime.current_turn_id = msg.params.turn_id
         try:
             await run_soul(
                 self._soul,
