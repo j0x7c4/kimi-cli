@@ -846,6 +846,13 @@ class SessionProcess:
                         "id": message.id,
                         "params": {
                             "user_input": [part.model_dump(mode="json") for part in user_input],
+                            # K3 (坑③): the gateway re-serializes the frame here, so
+                            # turn_id must be explicitly carried through or it is dropped.
+                            **(
+                                {"turn_id": message.params.turn_id}
+                                if message.params.turn_id
+                                else {}
+                            ),
                         },
                     },
                     ensure_ascii=False,

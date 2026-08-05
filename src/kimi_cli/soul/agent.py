@@ -214,6 +214,10 @@ class Runtime:
     resumed: bool = False
     hook_engine: Any = None
     """HookEngine instance, set by KimiCLI after soul creation."""
+    current_turn_id: str | None = None
+    """K3: canonical turn_id of the in-flight wire prompt. Overwritten each turn
+    by the wire server before run_soul; read by KimiSoul._step to inject
+    per-request token-accounting metadata."""
 
     def __post_init__(self) -> None:
         if self.subagent_store is None:
