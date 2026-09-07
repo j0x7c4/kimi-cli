@@ -75,6 +75,33 @@ def _is_initialize_frame(message: str) -> bool:
     return isinstance(obj, dict) and obj.get("method") == "initialize"
 
 
+#: Key that marks a worker → gateway diagnostic line (never a JSON-RPC frame).
+_DIAG_FRAME_KEY = "kimo_diag"
+
+
+def _diag_frame(message: str) -> dict | None:
+    """Return the decoded diagnostic frame for ``message``, else ``None``.
+
+    hechun-fork-cci (warm pool). The worker can emit cold-start timing numbers
+    on stdout — the only channel that reaches the gateway live (fd 2 is dup2'd
+    into ``kimi.log``, and the CCI exec stderr channel is drained only when the
+    worker exits). Those lines share the pipe with JSON-RPC, so they carry an
+    explicit key and the read loop consumes them here: not broadcast to
+    WebSocket clients, and never fed to the JSON-RPC validator.
+
+    The earlier diagnostic build wrote a bare text line instead, which surfaced
+    as a misleading ``Invalid JSONRPC out message`` and was forwarded verbatim
+    to every connected client.
+    """
+    try:
+        obj = json.loads(message)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(obj, dict) and isinstance(obj.get(_DIAG_FRAME_KEY), str):
+        return obj
+    return None
+
+
 # hechun-fork-cci (方案 B): the gateway answers worker MemoryOpRequests against
 # its own RDS-reachable storage. Built once (lazily), reused across sessions —
 # same MyKimoStorage the app lifespan builds. Guarded by a lock so concurrent
@@ -584,7 +611,18 @@ class SessionProcess:
                     else:
                         continue
 
-                await self._broadcast(line.decode("utf-8").rstrip("\n"))
+                decoded_line = line.decode("utf-8").rstrip("\n")
+
+                diag = _diag_frame(decoded_line)
+                if diag is not None:
+                    logger.info(
+                        "[kimo][worker-diag] sid={sid} {payload}",
+                        sid=self.session_id,
+                        payload=diag,
+                    )
+                    continue
+
+                await self._broadcast(decoded_line)
 
                 # Handle out message
                 try:

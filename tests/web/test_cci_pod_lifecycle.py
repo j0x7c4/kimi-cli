@@ -302,8 +302,9 @@ class _FakeSpawner:
 
 
 class _FakeCCIRunner:
-    def __init__(self, *, spawner, extra_env=None):
+    def __init__(self, *, spawner, extra_env=None, warm_pool=None):
         self._spawner = spawner
+        self._warm_pool = warm_pool
 
     def start(self):
         pass

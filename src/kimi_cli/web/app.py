@@ -40,6 +40,7 @@ from kimi_cli.web.api import (
     open_in_router,
     sandbox_assets_router,
     sessions_router,
+    warmpool_router,
     work_dirs_router,
 )
 from kimi_cli.web.auth import (
@@ -303,6 +304,48 @@ async def _cci_idle_sweeper(
             logger.warning("[cci-sweeper] sweep pass errored (continuing): {err}", err=e)
 
 
+async def _build_warm_pool(app: FastAPI) -> Any | None:
+    """Construct + start the WarmPoolManager, or return None.
+
+    Returns None (and logs why) whenever the pool cannot run — disabled by env,
+    or the storage backend is not the MySQL one that owns the
+    ``kimo_sandbox_pod`` rows. The pool is an optimisation: never let its
+    absence, or a failure to build it, stop the gateway from serving sessions
+    the way it always has.
+    """
+    from kimi_cli.web.warmpool.manager import WarmPoolManager
+
+    if not WarmPoolManager.enabled_from_env():
+        logger.info("[warmpool] disabled (KIMO_WARMPOOL_ENABLED not set)")
+        return None
+    engine = getattr(getattr(app.state, "kimo_storage", None), "engine", None)
+    if engine is None:
+        logger.warning(
+            "[warmpool] storage backend exposes no SQL engine "
+            "(kimo_sandbox_pod lives in MySQL); pool stays off"
+        )
+        return None
+    try:
+        from kimi_cli.web.runner.cci_process import build_warm_sandbox_env
+        from kimi_cli.web.warmpool.store import WarmPoolStore
+
+        agent = WarmPoolManager.agent_from_env()
+        pool = WarmPoolManager(
+            spawner=app.state.spawner,
+            store=WarmPoolStore(engine),
+            env_builder=lambda: build_warm_sandbox_env(agent),
+            size=WarmPoolManager.size_from_env(),
+            agent=agent,
+            metrics=getattr(app.state, "metrics", None),
+            refill_interval_s=_int_env("KIMO_WARMPOOL_REFILL_INTERVAL_SECONDS", default=30),
+        )
+        await pool.start()
+        return pool
+    except Exception as e:  # noqa: BLE001 — the pool must never block startup
+        logger.warning("[warmpool] init failed; pool stays off: {err}", err=e)
+        return None
+
+
 def create_app(
     session_token: str | None = None,
     allowed_origins: list[str] | None = None,
@@ -421,10 +464,10 @@ def create_app(
         #   3. else → KimiCLIRunner (local subprocess).
         use_containers = _load_env_flag("KIMI_USE_CONTAINERS")
         sweeper_task: asyncio.Task[None] | None = None
+        warm_pool: Any | None = None
         if _spawner_backend == "cci" and app.state.spawner is not None:
             from kimi_cli.web.runner.cci_process import CCIRunner
 
-            runner = CCIRunner(spawner=app.state.spawner)
             logger.info("[create_app] runner=CCIRunner (exec WebSocket)")
 
             # hechun-fork-cci: gateway-side Pod 生命周期兜底（不依赖 backend 正确性）。
@@ -439,6 +482,17 @@ def create_app(
                     logger.info("[create_app] reconcile_orphans 删除 {n} 个孤儿 Pod", n=n)
                 except Exception as _e:  # noqa: BLE001 — 清扫失败不阻塞启动
                     logger.warning("[create_app] reconcile_orphans 失败（忽略）: {err}", err=_e)
+            # hechun-fork-cci (warm pool): keep N Pods pre-warmed so a new session
+            # can be bound in ~seconds instead of paying the full 30–39s cold
+            # start. Off unless KIMO_WARMPOOL_ENABLED — and always optional: if
+            # anything below fails the gateway runs exactly as it did before.
+            #
+            # ⚠️ Must be constructed AFTER reconcile_orphans above: that call
+            # deletes every kimo-sandbox-* Pod in the namespace, so the pool's
+            # startup reconcile (which marks the corresponding rows dead) has to
+            # observe the post-deletion world (spec §9).
+            warm_pool = await _build_warm_pool(app)
+            runner = CCIRunner(spawner=app.state.spawner, warm_pool=warm_pool)
         elif use_containers and ContainerRunner is not None:
             runner = ContainerRunner(
                 image=os.environ.get("SANDBOX_IMAGE", "kimi-agent-sandbox:latest"),
@@ -452,6 +506,7 @@ def create_app(
         else:
             runner = KimiCLIRunner()
         app.state.runner = runner
+        app.state.warm_pool = warm_pool
         runner.start()
 
         # hechun-fork-cci: idle 兜底 sweeper —— 仅 CCI 模式启。周期回收"worker 活着但
@@ -479,6 +534,9 @@ def create_app(
         try:
             yield
         finally:
+            if warm_pool is not None:
+                with suppress(Exception):
+                    await warm_pool.close()
             if sweeper_task is not None:
                 sweeper_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -536,6 +594,7 @@ def create_app(
     # gateway host. The handler verifies the gateway session token itself
     # (the path is outside /api/ so AuthMiddleware does not gate it).
     application.include_router(sandbox_assets_router)
+    application.include_router(warmpool_router)
     if not restrict_sensitive_apis:
         application.include_router(open_in_router)
 

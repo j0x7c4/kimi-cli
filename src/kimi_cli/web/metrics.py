@@ -207,6 +207,29 @@ class MetricsState:
         with contextlib.suppress(Exception):
             self.metrics["active_sandboxes"].inc(delta)
 
+    # ── warm pool (spec §10) ────────────────────────────────────────────────
+    # These three metrics were defined when the CCI deployment landed but never
+    # had a writer; the WarmPoolManager is that writer.
+
+    def set_warmpool_size(self, *, phase: str, value: int) -> None:
+        """``kimo_warmpool_size{phase}`` — rows per warm-pool state."""
+        with contextlib.suppress(Exception):
+            self.metrics["warmpool_size"].labels(phase=phase).set(value)
+
+    def set_warmpool_hit_ratio(self, value: float) -> None:
+        """``kimo_warmpool_hit_ratio`` — claims served from the pool / all claims.
+
+        NB the alerting rule is on THIS metric staying at 0, not on an empty
+        pool: a miss degrades to a cold start, which is a supported path.
+        """
+        with contextlib.suppress(Exception):
+            self.metrics["warmpool_hit_ratio"].set(value)
+
+    def observe_warmpool_acquire(self, seconds: float) -> None:
+        """``kimo_warmpool_acquire_duration_seconds`` — one acquire attempt."""
+        with contextlib.suppress(Exception):
+            self.metrics["warmpool_acquire_duration"].observe(seconds)
+
     def record_cci_api_error(self, *, operation: str, code: str) -> None:
         """``kimo_cci_api_error_total{operation,code}`` +1 on a CCI REST error."""
         with contextlib.suppress(Exception):

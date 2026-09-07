@@ -53,6 +53,12 @@ _HANDSHAKE_TIMEOUT_S = 20
 # exec the worker bootstrap directly (spec §5 stdin:true + 上游 §3.4 BIND).
 DEFAULT_EXEC_COMMAND = ["/start-sandbox.sh"]
 
+# Warm-pool exec command: the two-phase worker entry. ``/start-sandbox.sh`` execs
+# ``worker "$KIMI_SESSION_ID"``, which needs a session id the warm Pod does not
+# have yet; ``--warm`` prepares everything session-independent and then blocks on
+# the warm handshake (web/runner/warm_protocol.py) until a bind frame claims it.
+WARM_EXEC_COMMAND = ["python", "-m", "kimi_cli.web.runner.worker", "--warm"]
+
 
 def build_exec_url(endpoint: str, ns: str, pod: str, command: list[str]) -> str:
     """Build the wss exec URL with channel query params (spec §3).

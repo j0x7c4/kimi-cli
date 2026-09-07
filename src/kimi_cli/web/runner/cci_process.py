@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from typing import Any
 from uuid import UUID, uuid4
 
 from kimi_cli import logger
@@ -49,6 +50,81 @@ from kimi_cli.web.spawner.cci_exec import KimoExecStream
 from kimi_cli.wire.jsonrpc import JSONRPCErrorObject, JSONRPCErrorResponse
 
 
+def build_warm_sandbox_env(agent_name: str) -> dict[str, str]:
+    """Env for a warm Pod: everything a sandbox needs EXCEPT an identity.
+
+    Same passthrough set as :meth:`CCISessionProcess._build_sandbox_env`, minus
+    ``KIMI_SESSION_ID`` / ``KIMI_USER_ID`` — a warm Pod is created before any
+    session exists, and those two arrive later in the bind frame. This is not a
+    convenience: baking a placeholder identity into the Pod env would be read by
+    the MCP config's ``${KIMI_USER_ID}`` substitution, and the resulting
+    connection is never rebuilt after binding (spec §4.4).
+    """
+    env: dict[str, str] = {}
+    host_env = get_clean_env()
+    for var_name in _SANDBOX_ENV_VARS:
+        value = host_env.get(var_name)
+        if value is not None:
+            env[var_name] = value
+    if agent_name:
+        env["SUBAGENT"] = agent_name
+        env["KIMI_REQUIRE_AGENT"] = "1"
+    internal_url = (host_env.get("KIMO_GATEWAY_INTERNAL_URL") or "").strip()
+    if internal_url:
+        env["KIMO_SANDBOX_ASSETS_URL"] = internal_url.rstrip("/") + SANDBOX_ASSETS_PATH
+        token = host_env.get("KIMI_WEB_SESSION_TOKEN")
+        if token:
+            env["KIMO_SANDBOX_ASSETS_TOKEN"] = token
+    via_gateway = _memory_via_gateway_flag()
+    if via_gateway is not None:
+        env["KIMO_MEMORY_VIA_GATEWAY"] = via_gateway
+    return env
+
+
+def _truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_bind_identity(session_id: UUID, env: dict[str, str]) -> tuple[str, bool]:
+    """Resolve the ``(owner_id, yolo)`` a warm-pool bind frame must carry.
+
+    🔴 These two values cannot be left to the worker to discover. On CCI the
+    worker's storage is a ``RemoteKimoStorage`` whose ``load_session_state`` is
+    inert by design (always None), so a worker that "reads its own state" reads
+    nothing and silently keeps ``yolo=False`` — which strands every tool call on
+    an approval prompt the iOS/Flutter UIs cannot answer. The gateway, by
+    contrast, wrote ``kimo_session_state`` itself and can read it back, so it
+    resolves both here and hard-fails the claim if the result is unusable
+    (spec §4.3).
+
+    Blocking (SQLAlchemy) — call from a thread.
+    """
+    owner_id = env.get("KIMI_USER_ID", "")
+    yolo = _truthy(env.get("KIMO_DEFAULT_YOLO"))
+    try:
+        from typing import cast
+
+        from kimi_cli.session_state import load_session_state_via_storage
+        from kimi_cli.storage import KimoStorage
+        from kimi_cli.web.runner.process import _get_gateway_memory_storage
+
+        # Same gateway-side storage the memory proxy uses (a MyKimoStorage that
+        # CAN reach RDS, unlike the worker's inert RemoteKimoStorage).
+        storage = cast("KimoStorage", _get_gateway_memory_storage())
+        state = load_session_state_via_storage(session_id, storage)
+        if state.owner_id:
+            owner_id = state.owner_id
+        yolo = yolo or bool(state.approval.yolo)
+    except Exception as e:  # noqa: BLE001 — env values remain the fallback
+        logger.warning(
+            "[CCISessionProcess] could not read persisted state for sid={sid} "
+            "({err}); binding with env-derived identity",
+            sid=session_id,
+            err=e,
+        )
+    return owner_id, yolo
+
+
 class CCISessionProcess(SessionProcess):
     """SessionProcess whose worker runs in a CCI Pod, driven over exec WebSocket.
 
@@ -65,10 +141,18 @@ class CCISessionProcess(SessionProcess):
         *,
         spawner: SandboxSpawner,
         extra_env: dict[str, str] | None = None,
+        warm_pool: Any | None = None,
     ) -> None:
         super().__init__(session_id)
         self._spawner = spawner
         self._extra_env = extra_env or {}
+        # Optional WarmPoolManager. When present, ``start`` tries to adopt an
+        # already-warmed Pod before falling back to the cold spawn path; None
+        # (docker path / pool disabled) keeps the original behaviour exactly.
+        self._warm_pool = warm_pool
+        # pod_name of the warm Pod this session adopted (None on the cold path).
+        # Used to close its kimo_sandbox_pod row once the Pod is torn down.
+        self._adopted_pod_name: str | None = None
         self._handle: SandboxHandle | None = None
         self._exec_stream: KimoExecStream | None = None
         # 冷启动分段计时（仅诊断日志，不影响任何行为）。start() 的冷启动路径填入
@@ -179,6 +263,8 @@ class CCISessionProcess(SessionProcess):
             with contextlib.suppress(Exception):
                 await stream.close()
 
+        await self._retire_adopted_row(reason="worker_exit")
+
         if handle is not None:
             try:
                 await self._spawner.stop(handle)
@@ -195,6 +281,16 @@ class CCISessionProcess(SessionProcess):
                     pod=handle.handle_id,
                     err=e,
                 )
+
+    async def _retire_adopted_row(self, reason: str) -> None:
+        """Close the ``kimo_sandbox_pod`` row of an adopted Pod after teardown."""
+        pod_name = self._adopted_pod_name
+        pool = self._warm_pool
+        self._adopted_pod_name = None
+        if pod_name is None or pool is None:
+            return
+        with contextlib.suppress(Exception):
+            await pool.release(pod_name, reason)
 
     async def _on_worker_exit(self, returncode: int | None, stderr: bytes) -> None:
         """Worker died unexpectedly → delete its now-worthless Pod, then (for the
@@ -291,17 +387,28 @@ class CCISessionProcess(SessionProcess):
             # 冷启动分段计时锚点 T0（spawn 前）。perf_counter 不抛，纯诊断，不改任何行为。
             _timing_t0 = time.perf_counter()
 
-            logger.info(
-                "Spawning CCI sandbox for session {sid}", sid=self.session_id
-            )
-            self._handle = await self._spawner.spawn(
-                self.session_id, env.get("KIMI_USER_ID", ""), env
-            )
-            _timing_t1 = time.perf_counter()  # spawn 返回：pod Running + podIP
-            stream = await self._spawner.attach(self._handle)
-            assert isinstance(stream, KimoExecStream)
-            self._exec_stream = stream
-            _timing_t2 = time.perf_counter()  # attach 返回：exec WS 握手完成
+            adopted = await self._adopt_warm_pod(env)
+            if adopted is not None:
+                # Warm path: the Pod already exists and its worker already
+                # confirmed the bind, so "spawn" and "attach" both cost nothing
+                # here. Timing marks are still filled in so the same
+                # ``[kimo][timing]`` line can be compared against the cold baseline.
+                self._handle, stream = adopted
+                assert isinstance(stream, KimoExecStream)
+                self._exec_stream = stream
+                _timing_t1 = _timing_t2 = time.perf_counter()
+            else:
+                logger.info(
+                    "Spawning CCI sandbox for session {sid}", sid=self.session_id
+                )
+                self._handle = await self._spawner.spawn(
+                    self.session_id, env.get("KIMI_USER_ID", ""), env
+                )
+                _timing_t1 = time.perf_counter()  # spawn 返回：pod Running + podIP
+                stream = await self._spawner.attach(self._handle)
+                assert isinstance(stream, KimoExecStream)
+                self._exec_stream = stream
+                _timing_t2 = time.perf_counter()  # attach 返回：exec WS 握手完成
             # 交给 read-loop：收到 worker 首行 stdout 时补 T3 打汇总（_log_cold_start_timing）。
             self._cold_start_marks = (_timing_t0, _timing_t1, _timing_t2)
             self._cold_start_timing_pending = True
@@ -347,6 +454,7 @@ class CCISessionProcess(SessionProcess):
                         err=e,
                     )
                 self._handle = None
+            await self._retire_adopted_row(reason=reason or "stop")
 
             if self._read_task is not None:
                 self._read_task.cancel()
@@ -359,6 +467,57 @@ class CCISessionProcess(SessionProcess):
             self._expecting_exit = False
             if emit_status:
                 await self._emit_status("stopped", reason=reason or "stop")
+
+    # ── warm pool adoption ────────────────────────────────────────────────────
+
+    async def _adopt_warm_pod(
+        self, env: dict[str, str]
+    ) -> tuple[SandboxHandle, KimoExecStream] | None:
+        """Try to take over an already-warmed Pod instead of spawning one.
+
+        Returns the adopted (handle, stream) or ``None`` for "spawn normally".
+        Every failure inside — pool empty, claim lost, bind rejected, pool
+        unavailable — returns ``None``: the warm pool is an optimisation and must
+        never be able to fail a session (spec §2).
+
+        ⚠️ Ordering: :meth:`WarmPoolManager.acquire` has already written the bind
+        frame and waited for the worker's confirmation by the time it returns.
+        ``start`` then starts the read loop and only afterwards replays
+        ``initialize`` — replaying it earlier would feed the initialize frame to a
+        worker still blocked on its bind read, which would swallow it as the bind
+        line (W0 spike finding #3).
+        """
+        pool = self._warm_pool
+        if pool is None:
+            return None
+        try:
+            owner_id, yolo = await asyncio.to_thread(
+                _resolve_bind_identity, self.session_id, env
+            )
+            claimed = await pool.acquire(
+                self.session_id,
+                owner_id,
+                yolo=yolo,
+                agent=env.get("SUBAGENT"),
+                env=env,
+            )
+        except Exception as e:  # noqa: BLE001 — never let the pool break a session
+            logger.warning(
+                "[CCISessionProcess] warm-pool acquire failed sid={sid}; cold start: {err}",
+                sid=self.session_id,
+                err=e,
+            )
+            return None
+        if claimed is None:
+            return None
+        handle, stream = claimed
+        self._adopted_pod_name = handle.handle_id
+        logger.info(
+            "[CCISessionProcess] adopted warm pod {pod} for session {sid}",
+            pod=handle.handle_id,
+            sid=self.session_id,
+        )
+        return handle, stream
 
     # ── env (same contract as ContainerSessionProcess) ────────────────────────
 
@@ -425,10 +584,12 @@ class CCIRunner(KimiCLIRunner):
         *,
         spawner: SandboxSpawner,
         extra_env: dict[str, str] | None = None,
+        warm_pool: Any | None = None,
     ) -> None:
         super().__init__()
         self._spawner = spawner
         self._extra_env = extra_env or {}
+        self._warm_pool = warm_pool
 
     def start(self) -> None:
         """No-op; Pods are spawned on demand at first ``start``."""
@@ -448,6 +609,7 @@ class CCIRunner(KimiCLIRunner):
                     session_id,
                     spawner=self._spawner,
                     extra_env=self._extra_env,
+                    warm_pool=self._warm_pool,
                 )
             proc = self._sessions[session_id]
             assert isinstance(proc, CCISessionProcess)
@@ -459,4 +621,4 @@ class CCIRunner(KimiCLIRunner):
 CCIRunner.__module__ = "kimi_cli.web.runner.process"
 
 
-__all__ = ["CCISessionProcess", "CCIRunner"]
+__all__ = ["CCISessionProcess", "CCIRunner", "build_warm_sandbox_env"]

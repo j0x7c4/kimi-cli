@@ -9,6 +9,7 @@ from kimi_cli.web.api import (
     open_in,
     sandbox_assets,
     sessions,
+    warmpool,
 )
 from kimi_cli.web.api import branding as branding_module
 
@@ -24,6 +25,7 @@ branding_admin_router = branding_module.admin_router
 memory_router = memory.router
 capabilities_router = capabilities.capabilities_router
 sandbox_assets_router = sandbox_assets.router
+warmpool_router = warmpool.router
 
 __all__ = [
     "admin_router",
@@ -37,5 +39,6 @@ __all__ = [
     "open_in_router",
     "sandbox_assets_router",
     "sessions_router",
+    "warmpool_router",
     "work_dirs_router",
 ]

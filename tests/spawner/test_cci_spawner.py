@@ -90,11 +90,24 @@ class TestPodSpec:
         # swr-pull-secret would 401 — wrong name → anonymous pull).
         assert pod["spec"]["imagePullSecrets"] == [{"name": "imagepull-secret"}]
 
-    def test_warm_mode_uses_warm_label(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setenv("KIMI_WARM_MODE", "warm")
+    def test_warm_mode_is_per_spawn_not_a_process_wide_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """``warm`` is an argument, not gateway env.
+
+        As a process env var it could only say "this whole gateway is warm",
+        which is useless for a pool that must run one warm Pod alongside N bound
+        ones. The stale env must have no effect either way.
+        """
+        monkeypatch.setenv("KIMI_WARM_MODE", "warm")  # legacy switch: now inert
         sp = _make_spawner(_FakeClient())
-        pod = sp._build_pod_spec(uuid4(), "owner", {})
-        assert pod["metadata"]["labels"]["app"] == "kimo-sandbox-warm"
+        assert sp._build_pod_spec(uuid4(), "owner", {})["metadata"]["labels"]["app"] == (
+            "kimo-sandbox"
+        )
+        warm = sp._build_pod_spec(uuid4(), "owner", {}, warm=True, pod_name="kimo-sandbox-w1")
+        assert warm["metadata"]["labels"]["app"] == "kimo-sandbox-warm"
+        # A warm Pod's name is independent of any session id (spec §5).
+        assert warm["metadata"]["name"] == "kimo-sandbox-w1"
 
 
 class TestSpawn:

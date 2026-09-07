@@ -165,13 +165,34 @@ class CCISpawner:
 
     # ── lifecycle ───────────────────────────────────────────────────────────
 
-    async def spawn(self, sid: UUID, owner_id: str, env: dict[str, str]) -> SandboxHandle:
+    async def spawn(
+        self,
+        sid: UUID,
+        owner_id: str,
+        env: dict[str, str],
+        *,
+        warm: bool = False,
+        pod_name: str | None = None,
+    ) -> SandboxHandle:
+        """Create a Pod and wait until it is Running.
+
+        ``warm`` / ``pod_name`` are the warm-pool additions (both default to the
+        pre-existing behaviour):
+
+        * ``warm`` marks this ONE Pod as a pool Pod (``app=kimo-sandbox-warm``
+          label). It used to be read from the gateway's own env, which made it a
+          process-global switch — useless for a pool that must run warm and
+          bound Pods side by side.
+        * ``pod_name`` overrides the ``kimo-sandbox-{sid}`` naming. A warm Pod is
+          created before any session exists, so its name cannot encode one; the
+          ``kimo_sandbox_pod`` table is the mapping instead (spec §5).
+        """
         # spec §7.2: one kimo_sandbox_spawn_total{backend="cci",result} per attempt,
         # result ∈ {success, timeout, failure}; duration observed on success only
         # (a timed-out / errored spawn has no meaningful "Running+podIP ready" time
         # and would skew the latency histogram). active_sandboxes +1 on success.
         started = time.perf_counter()
-        pod = self._build_pod_spec(sid, owner_id, env)
+        pod = self._build_pod_spec(sid, owner_id, env, warm=warm, pod_name=pod_name)
         try:
             resp = await self._create_pod_replacing_orphan(pod)
             name = resp.get("metadata", {}).get("name") or pod["metadata"]["name"]
@@ -311,10 +332,24 @@ class CCISpawner:
             logger.info("reconcile_orphans: 共删除 {n} 个孤儿 sandbox Pod", n=deleted)
         return deleted
 
-    async def attach(self, handle: SandboxHandle) -> KimoExecStream:
+    async def attach(
+        self, handle: SandboxHandle, *, command: list[str] | None = None
+    ) -> KimoExecStream:
+        """Open the exec WebSocket into a Pod.
+
+        ``command`` defaults to the image's ``/start-sandbox.sh`` (which execs the
+        single-phase worker). The warm pool passes the two-phase entry instead —
+        the exec command is fully gateway-controlled, which is precisely why a
+        warm Pod can be created without knowing the session id and still run a
+        worker that later learns its identity from the bind frame.
+        """
         stream = KimoExecStream()
         await stream.connect(
-            self.endpoint, self.namespace, handle.handle_id, self.token_provider
+            self.endpoint,
+            self.namespace,
+            handle.handle_id,
+            self.token_provider,
+            command=command,
         )
         return stream
 
@@ -346,11 +381,18 @@ class CCISpawner:
 
     # ── internals ─────────────────────────────────────────────────────────────
 
-    def _build_pod_spec(self, sid: UUID, owner_id: str, env: dict[str, str]) -> dict:
-        warm = (os.environ.get("KIMI_WARM_MODE") or "").strip().lower() in {"1", "true", "warm"}
+    def _build_pod_spec(
+        self,
+        sid: UUID,
+        owner_id: str,
+        env: dict[str, str],
+        *,
+        warm: bool = False,
+        pod_name: str | None = None,
+    ) -> dict:
         app_label = "kimo-sandbox-warm" if warm else "kimo-sandbox"
         metadata = {
-            "name": f"kimo-sandbox-{sid}",
+            "name": pod_name or f"kimo-sandbox-{sid}",
             "namespace": self.namespace,
             "labels": {
                 "app": app_label,

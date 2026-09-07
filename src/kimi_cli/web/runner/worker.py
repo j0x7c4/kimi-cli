@@ -121,6 +121,15 @@ _REQUIRE_AGENT_ENV = "KIMI_REQUIRE_AGENT"
 _ASSETS_URL_ENV = "KIMO_SANDBOX_ASSETS_URL"
 _ASSETS_TOKEN_ENV = "KIMO_SANDBOX_ASSETS_TOKEN"
 
+# hechun-fork-cci (warm pool): opt-in gate for the cold-start timing frame on
+# stdout. Off by default so production workers keep a pure JSON-RPC stdout.
+_TIMING_ENV = "KIMO_WORKER_TIMING"
+
+# Mirrors of the warm-protocol reason labels, imported lazily below so this
+# module keeps its import surface unchanged on the docker/local path.
+_REASON_ASSETS_MISSING_LABEL = "assets_missing"
+_REASON_AGENT_UNRESOLVED_LABEL = "agent_unresolved"
+
 
 def _is_safe_tar_member(name: str) -> bool:
     """Reject absolute paths and ``..`` traversal in a tar member name.
@@ -218,22 +227,26 @@ def _fetch_sandbox_assets() -> None:
 
 
 def _emit_worker_timing(session_id: UUID) -> None:
-    """hechun-diag(warmpool M0): 打一行 worker 冷启动分段耗时。**纯诊断，无控制流影响。**
+    """Emit one worker cold-start timing line. Diagnostic only — never affects control flow.
 
-    两个出口，都是 best-effort（任何异常吞掉）：
+    Two sinks, both best-effort (every exception swallowed):
 
-    1. ``logger.info`` → Pod 内 ``kimi.log``（enable_logging 已把 fd2 dup2 进日志文件，
-       所以 stderr 那条路在 gateway 侧看不见）。
-    2. stdout 一行**故意非 JSON** 的文本 → gateway 的 read-loop 走 ``json.JSONDecodeError``
-       分支，原样打 ``Invalid JSONRPC out message: <line>`` 进 gateway 日志
-       （``web/runner/process.py:610-611``）——这是唯一能把 worker 内部数字带出 Pod 的现成通道。
-       JSONDecodeError 是被捕获的分支，read-loop 不会因此中断。
-       ⚠️ 该行会先被 ``_broadcast`` 原样转发给 WS 客户端；客户端解析失败会忽略。
-       这是诊断镜像专用，**不得进入 prod**。
+    1. ``logger.info`` → the Pod's ``kimi.log``.
+    2. **Only when ``KIMO_WORKER_TIMING`` is truthy** — one ``kimo_diag`` frame on
+       stdout. The gateway read loop recognises that key, logs it and consumes it
+       (``process.py`` ``_is_diag_frame``): it is neither broadcast to WebSocket
+       clients nor fed to the JSON-RPC validator.
 
-    与 gateway 侧 ``cci_process._log_cold_start_timing`` 的 ``worker_load`` 对齐：
-    gateway 用「read-loop 收到的第一行非空 stdout」当就绪锚点，本行正是那一行，
-    故 fetch+import+session+mcp+create 之和应约等于 gateway 打出的 worker_load。
+    Why stdout and not stderr: ``enable_logging`` dup2's fd 2 into ``kimi.log``,
+    and the CCI exec stderr channel is only drained by the gateway when the worker
+    exits — so stderr carries no live signal out of the Pod. stdout is the one
+    live channel, hence the explicit gate + the dedicated frame shape (the M0
+    diagnostic build wrote a bare text line here, which the gateway could only
+    surface as a misleading ``Invalid JSONRPC out message``).
+
+    Aligned with the gateway's ``cci_process._log_cold_start_timing``:
+    ``worker_load`` is anchored on the first non-empty stdout line, so
+    fetch+import+session+mcp+create should sum to roughly that number.
     """
     try:
         d = _DIAG
@@ -287,22 +300,136 @@ def _emit_worker_timing(session_id: UUID) -> None:
             c_tot=_cp.get("total_ms", -1),
         )
         logger.info(line)
-        sys.stdout.write(line + "\n")
-        sys.stdout.flush()
+        if _is_truthy_env(_TIMING_ENV):
+            sys.stdout.write(
+                json.dumps(
+                    {
+                        "kimo_diag": "worker_timing",
+                        "sid": str(session_id),
+                        "line": line,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            sys.stdout.flush()
     except Exception:  # noqa: BLE001 — 诊断绝不能弄崩 worker 启动
         pass
 
 
-async def run_worker(session_id: UUID) -> None:
-    """Run the KimiCLI worker for a session."""
-    # hechun-fork-cci: on the CCI path the Pod can't bind-mount the gateway
-    # host, so pull static assets (~/.kimi/agents custom agent specs, etc.) from
-    # the gateway and unpack them under $HOME BEFORE agent resolution below
-    # consumes them. No-op on docker/local (env not injected). Run off-thread:
-    # httpx.get is blocking and run_worker drives an asyncio event loop.
+class PrepareResult:
+    """Outcome of the session-independent (pre-bind) half of worker startup.
+
+    ``ok`` is what the gateway turns into ``warming → ready``. It is deliberately
+    stricter than "the process started": :func:`_fetch_sandbox_assets` logs
+    download failures loudly but does **not** raise (an opaque crash there used
+    to surface downstream as a misleading ``SubagentNotFoundError``), so a Pod
+    whose agent yaml never arrived would otherwise be advertised as ready, sit in
+    the pool forever and fail every single claim. Hence the explicit
+    "did the agent spec actually land on disk" check.
+    """
+
+    __slots__ = ("ok", "reason", "agent_name", "agent_path", "prepare_ms")
+
+    def __init__(
+        self,
+        *,
+        ok: bool,
+        reason: str | None = None,
+        agent_name: str = "",
+        agent_path: str | None = None,
+        prepare_ms: float = -1.0,
+    ) -> None:
+        self.ok = ok
+        self.reason = reason
+        self.agent_name = agent_name
+        self.agent_path = agent_path
+        self.prepare_ms = prepare_ms
+
+
+def _verify_static_assets() -> PrepareResult:
+    """Check that the static prep actually produced what a claim will need.
+
+    Only meaningful when ``SUBAGENT`` names a required agent (the gateway sets it
+    for every hechun session, warm Pods included). Without it there is nothing
+    session-independent left to verify, so the result is ``ok``.
+    """
+    agent_name = os.environ.get("SUBAGENT", "").strip()
+    if not agent_name:
+        return PrepareResult(ok=True)
+    work_dir = Path(os.environ.get("KIMI_WORK_DIR") or "/app")
+    try:
+        path = resolve_subagent_yaml(agent_name, work_dir=work_dir)
+    except Exception as e:  # noqa: BLE001 — a resolution crash is a failed prep, not a crash
+        logger.error(
+            "[warm] agent resolution raised while verifying static assets "
+            "(SUBAGENT={name}): {err}",
+            name=agent_name,
+            err=e,
+        )
+        return PrepareResult(ok=False, reason=_REASON_AGENT_UNRESOLVED_LABEL, agent_name=agent_name)
+    if path is None:
+        logger.error(
+            "[warm] static assets incomplete: SUBAGENT={name} did not resolve to an "
+            "agent yaml after the sandbox-assets fetch; refusing to report ready.",
+            name=agent_name,
+        )
+        return PrepareResult(ok=False, reason=_REASON_ASSETS_MISSING_LABEL, agent_name=agent_name)
+    return PrepareResult(ok=True, agent_name=agent_name, agent_path=str(path))
+
+
+async def prepare_static() -> PrepareResult:
+    """Phase 1: everything that is independent of session / owner identity.
+
+    hechun-fork-cci: on the CCI path the Pod can't bind-mount the gateway host,
+    so pull static assets (~/.kimi/agents custom agent specs, knowledge base…)
+    from the gateway and unpack them under $HOME BEFORE agent resolution consumes
+    them. No-op on docker/local (env not injected). Run off-thread: httpx.get is
+    blocking and the caller drives an asyncio event loop.
+
+    🔴 The phase boundary stops HERE and may not move one step further: the next
+    step consumes the session id, and everything below ``KimiCLI.create``
+    substitutes ``${KIMI_USER_ID}`` from ``os.environ`` into MCP headers. Building
+    those connections before a user is bound would attach an empty identity to a
+    connection that is never rebound (spec §4.4 — security, not latency).
+    """
     _DIAG["t_run_begin"] = time.perf_counter()
     await asyncio.to_thread(_fetch_sandbox_assets)
     _DIAG["t_fetch_done"] = time.perf_counter()
+    result = _verify_static_assets()
+    result.prepare_ms = (_DIAG["t_fetch_done"] - _DIAG["t_run_begin"]) * 1000.0
+    return result
+
+
+async def run_worker(session_id: UUID) -> None:
+    """Run the KimiCLI worker for a session (cold path: prepare then bind at once)."""
+    await prepare_static()
+    await bind_and_run(session_id)
+
+
+async def bind_and_run(
+    session_id: UUID,
+    *,
+    owner_id: str | None = None,
+    yolo: bool | None = None,
+) -> None:
+    """Phase 2: bind this worker to a real session and run it.
+
+    ``owner_id`` / ``yolo`` are supplied only on the warm-pool path, where they
+    arrive in the bind frame — the gateway holds the authoritative values, and on
+    CCI the worker's own storage cannot read them back (``RemoteKimoStorage``'s
+    ``load_session_state`` is inert by design). They are written into
+    ``os.environ`` here, i.e. *before* any MCP config is loaded, so the existing
+    env-driven resolution below sees exactly the identity that was bound. On the
+    cold path both are ``None`` and the pre-existing env/storage logic is
+    untouched.
+    """
+    if owner_id is not None:
+        os.environ["KIMI_USER_ID"] = owner_id
+    if yolo is not None:
+        os.environ["KIMO_DEFAULT_YOLO"] = "1" if yolo else "0"
+    if owner_id is not None or yolo is not None:
+        os.environ["KIMI_SESSION_ID"] = str(session_id)
 
     # Find session by ID using the web store (disk-based registry).
     joint_session = load_session_by_id(session_id)
@@ -516,6 +643,135 @@ async def run_worker(session_id: UUID) -> None:
     await kimi_cli.run_wire_stdio()
 
 
+# ── warm-pool (two-phase) entry ───────────────────────────────────────────────
+# The gateway execs ``python -m kimi_cli.web.runner.worker --warm`` into a Pod
+# that has no user yet. The worker does phase 1 (prepare_static), reports
+# ``ready``, then blocks on stdin speaking ONLY the warm handshake protocol
+# (web/runner/warm_protocol.py) until a bind frame claims it.
+
+#: hard cap on one warm handshake line (bytes) — the frames are ~200B; a peer
+#: that never sends a newline must not grow an unbounded buffer.
+_WARM_MAX_LINE = 1 << 20
+
+
+def _read_stdin_line_unbuffered(fd: int = 0) -> bytes | None:
+    """Read exactly one ``\n``-terminated line from ``fd``, one byte at a time.
+
+    🔴 Byte-at-a-time is not an oversight — it is the correctness requirement.
+    After the handshake, ``WireServer`` builds its OWN reader over fd 0, so any
+    byte this function reads past the trailing newline is lost forever. The
+    gateway writes the client's ``initialize`` frame immediately after the bind
+    frame, so a buffered reader would routinely swallow it into a buffer nobody
+    ever drains — and the session would silently lose its capability handshake
+    (exactly the AskUserQuestion class of bug). Warm handshake traffic is a
+    handful of ~200-byte frames, so the syscall cost is irrelevant.
+
+    Returns ``None`` at EOF (with no partial line), else the line without the
+    trailing newline.
+    """
+    buf = bytearray()
+    while True:
+        chunk = os.read(fd, 1)
+        if not chunk:
+            return bytes(buf) if buf else None
+        if chunk == b"\n":
+            return bytes(buf)
+        buf.extend(chunk)
+        if len(buf) > _WARM_MAX_LINE:
+            raise RuntimeError("warm handshake line exceeded size limit")
+
+
+def _write_warm_frame(frame_type: str, **fields: Any) -> None:
+    """Write one warm frame to the wire stdout (fd 1) and flush."""
+    from kimi_cli.web.runner import warm_protocol  # noqa: PLC0415
+
+    sys.stdout.write(warm_protocol.encode(frame_type, **fields))
+    sys.stdout.flush()
+
+
+async def _warm_handshake(prepared_at: float):
+    """Serve the warm handshake until a valid bind frame arrives.
+
+    Returns the parsed :class:`~kimi_cli.web.runner.warm_protocol.BindRequest`.
+    Exits the process (never returns) on EOF or on an invalid bind — a Pod whose
+    claim was malformed must not linger半绑定 in the pool; the gateway sees the
+    error frame / exit code, marks the row dead and falls back to a cold start.
+    """
+    from kimi_cli.web.runner import warm_protocol as wp  # noqa: PLC0415
+
+    while True:
+        line = await asyncio.to_thread(_read_stdin_line_unbuffered)
+        if line is None:
+            logger.info("[warm] stdin closed before bind; exiting warm worker")
+            sys.exit(0)
+        frame = wp.decode(line)
+        if frame is None:
+            # Not a warm frame. The gateway must not send JSON-RPC before the
+            # bind (it would be eaten as the bind line); log loudly and keep
+            # waiting rather than mis-binding.
+            logger.warning(
+                "[warm] ignoring non-warm line received before bind: {line!r}",
+                line=line[:200],
+            )
+            continue
+        kind = frame.get(wp.WARM_KEY)
+        if kind == wp.FRAME_PING:
+            _write_warm_frame(
+                wp.FRAME_PONG,
+                seq=frame.get("seq"),
+                uptime_ms=int((time.perf_counter() - prepared_at) * 1000),
+            )
+            continue
+        if kind == wp.FRAME_BIND:
+            try:
+                return wp.BindRequest.parse(frame)
+            except wp.WarmProtocolError as e:
+                logger.error(
+                    "[warm] bind rejected ({reason}): {detail}",
+                    reason=e.reason,
+                    detail=e.detail,
+                )
+                _write_warm_frame(wp.FRAME_ERROR, reason=e.reason, detail=e.detail)
+                sys.exit(wp.WARM_BIND_FAILURE_EXIT_CODE)
+        logger.warning("[warm] ignoring unexpected warm frame type {k!r}", k=kind)
+
+
+async def run_warm_worker() -> None:
+    """Two-phase worker entry: prepare, report ready, wait for a bind, then run."""
+    from kimi_cli.web.runner import warm_protocol as wp  # noqa: PLC0415
+
+    prepared = await prepare_static()
+    _write_warm_frame(
+        wp.FRAME_READY,
+        ok=prepared.ok,
+        reason=prepared.reason,
+        agent=prepared.agent_name,
+        agent_path=prepared.agent_path,
+        pid=os.getpid(),
+        prepare_ms=int(prepared.prepare_ms),
+    )
+    if not prepared.ok:
+        logger.error(
+            "[warm] static preparation failed ({reason}); exiting so the gateway "
+            "discards this Pod instead of pooling a Pod that fails every claim.",
+            reason=prepared.reason,
+        )
+        sys.exit(wp.WARM_PREPARE_FAILURE_EXIT_CODE)
+
+    prepared_at = time.perf_counter()
+    bind = await _warm_handshake(prepared_at)
+    for key, value in bind.env.items():
+        os.environ[key] = value
+    _write_warm_frame(wp.FRAME_BOUND, session_id=str(bind.session_id))
+    logger.info(
+        "[warm] bound to session {sid} owner={owner} yolo={yolo}",
+        sid=str(bind.session_id),
+        owner=bind.owner_id,
+        yolo=bind.yolo,
+    )
+    await bind_and_run(bind.session_id, owner_id=bind.owner_id, yolo=bind.yolo)
+
+
 def _emit_agent_load_failure_to_wire(message: str, reason: str) -> None:
     """Write ONE JSON-RPC error frame to the wire stdout (fd 1) before exit.
 
@@ -558,21 +814,34 @@ def main() -> None:
     set_process_title("kimi-code-worker")
 
     if len(sys.argv) < 2:
-        print("Usage: python -m kimi_cli.web.runner.worker <session_id>", file=sys.stderr)
+        print(
+            "Usage: python -m kimi_cli.web.runner.worker <session_id> | --warm",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
-    try:
-        session_id = UUID(sys.argv[1])
-    except ValueError:
-        print(f"Invalid session ID: {sys.argv[1]}", file=sys.stderr)
-        sys.exit(1)
+    # hechun-fork-cci (warm pool): ``--warm`` starts the two-phase worker — do the
+    # session-independent preparation now, then block on the warm handshake until
+    # the gateway binds a real session id / owner / yolo to this process.
+    warm = sys.argv[1] == "--warm"
+    session_id: UUID | None = None
+    if not warm:
+        try:
+            session_id = UUID(sys.argv[1])
+        except ValueError:
+            print(f"Invalid session ID: {sys.argv[1]}", file=sys.stderr)
+            sys.exit(1)
 
     # Enable logging for the subprocess
     enable_logging(debug=False)
 
     # Run the async worker
     try:
-        asyncio.run(run_worker(session_id))
+        if warm:
+            asyncio.run(run_warm_worker())
+        else:
+            assert session_id is not None
+            asyncio.run(run_worker(session_id))
     except (AgentRequiredError, SubagentNotFoundError) as exc:
         # hechun-fork-cci: required agent failed to load. Surface a clear error
         # to the client over the wire stdout (the traceback alone goes to

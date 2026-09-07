@@ -60,9 +60,19 @@ class SandboxSpawner(Protocol):
     ``container.attach_socket()`` — see :class:`kimi_cli.web.spawner.cci_exec.KimoExecStream`.
     """
 
-    async def spawn(self, sid: UUID, owner_id: str, env: dict[str, str]) -> SandboxHandle: ...
+    async def spawn(
+        self,
+        sid: UUID,
+        owner_id: str,
+        env: dict[str, str],
+        *,
+        warm: bool = False,
+        pod_name: str | None = None,
+    ) -> SandboxHandle: ...
 
-    async def attach(self, handle: SandboxHandle) -> object: ...
+    async def attach(
+        self, handle: SandboxHandle, *, command: list[str] | None = None
+    ) -> object: ...
 
     async def stop(self, handle: SandboxHandle) -> None: ...
 

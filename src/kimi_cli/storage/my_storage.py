@@ -166,6 +166,18 @@ class MyKimoStorage:
         # call Base.metadata.create_all().
         logger.info("[MyKimoStorage] initialized pool_size={n}", n=pool_size)
 
+    @property
+    def engine(self) -> Engine:
+        """The shared SQLAlchemy engine.
+
+        Exposed so other hechun-fork gateway components that must talk to the
+        SAME MySQL (currently the warm-pool store, which reads/writes
+        ``kimo_sandbox_pod``) can reuse this connection pool instead of building
+        a second one from the same credentials. Schema ownership is unchanged:
+        backend Flyway owns every table; nothing here creates or migrates.
+        """
+        return self._engine
+
     # ── session state ───
 
     def load_session_state(self, kimo_session_id: UUID) -> SessionState | None:
