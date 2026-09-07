@@ -95,18 +95,28 @@ def _is_deadlock(exc: BaseException) -> bool:
     other DB error still propagates, because silently treating (say) a
     connection failure as "pool empty" would hide a real outage behind a
     permanently cold start.
+
+    Three links are followed because the errno can sit at any of them:
+    SQLAlchemy raises its own ``OperationalError`` whose args are strings, keeps
+    the driver exception on ``.orig``, and chains it via ``__cause__``. Matching
+    on message text instead would be fragile across driver versions, so the test
+    is strictly on the integer errno.
     """
     seen: set[int] = set()
-    cur: BaseException | None = exc
-    while cur is not None and id(cur) not in seen:
+    pending: list[BaseException] = [exc]
+    while pending:
+        cur = pending.pop()
+        if id(cur) in seen:
+            continue
         seen.add(id(cur))
-        args = getattr(cur, "args", ())
-        for arg in args:
+        for arg in getattr(cur, "args", ()):
             if isinstance(arg, int) and arg == _ER_LOCK_DEADLOCK:
                 return True
             if isinstance(arg, (tuple, list)) and arg and arg[0] == _ER_LOCK_DEADLOCK:
                 return True
-        cur = cur.__cause__ or cur.__context__
+        for link in (getattr(cur, "orig", None), cur.__cause__, cur.__context__):
+            if isinstance(link, BaseException):
+                pending.append(link)
     return False
 
 

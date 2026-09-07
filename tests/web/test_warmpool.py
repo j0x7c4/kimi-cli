@@ -484,6 +484,36 @@ class TestFrozenClaimSQL:
         store._claim_once = _boom  # type: ignore[method-assign]
         assert store.claim("sid", "owner") is None
 
+    def test_deadlock_is_recognised_through_the_sqlalchemy_wrapper(self):
+        """The errno must be found wherever the driver stack parks it.
+
+        SQLAlchemy's own OperationalError carries only strings; the pymysql
+        error with ``(1213, ...)`` hangs off ``.orig`` (and off ``__cause__``).
+        Matching on message text would break across driver versions, so the
+        detector walks all three links and tests the integer.
+        """
+        from kimi_cli.web.warmpool.store import _is_deadlock
+
+        class _PyMySQLOperationalError(Exception):
+            pass
+
+        class _SAOperationalError(Exception):
+            def __init__(self, statement, orig):
+                super().__init__(f"(pymysql.err.OperationalError) {orig}", statement)
+                self.orig = orig
+
+        driver = _PyMySQLOperationalError(1213, "Deadlock found when trying to get lock")
+        wrapped = _SAOperationalError("UPDATE kimo_sandbox_pod ...", driver)
+        assert _is_deadlock(wrapped) is True
+
+        # Chained without .orig (raise ... from) is found too.
+        chained = _PyMySQLOperationalError("boom")
+        chained.__cause__ = driver
+        assert _is_deadlock(chained) is True
+
+        # A lock-WAIT timeout (1205) is NOT a deadlock and must propagate.
+        assert _is_deadlock(_PyMySQLOperationalError(1205, "Lock wait timeout")) is False
+
     def test_non_deadlock_db_errors_still_propagate(self):
         """Only 1213 is swallowed — an outage must not masquerade as a miss."""
         from kimi_cli.web.warmpool.store import WarmPoolStore
