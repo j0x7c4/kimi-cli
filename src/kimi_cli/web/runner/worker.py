@@ -13,17 +13,51 @@ import asyncio
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from kimi_cli import logger
-from kimi_cli.agentspec import resolve_subagent_yaml
-from kimi_cli.app import KimiCLI, enable_logging
-from kimi_cli.cli.mcp import get_global_mcp_config_file
-from kimi_cli.exception import MCPConfigError
-from kimi_cli.web.runner.mcp_discovery import load_auto_discovered_mcp_configs
-from kimi_cli.web.store.sessions import load_session_by_id
+# hechun-diag(warmpool M0): 纯诊断计时。目的是量出 worker 冷启动各段真实耗时占比
+# （spec 2026-09-07-sandbox-warmpool-design.md §1 的「worker_load 23s 大头是什么」从未测量）。
+# 只做打点 + 一行结构化日志，不改任何控制流 / 默认值。
+_DIAG: dict[str, float] = {}
+
+
+def _diag_proc_age_ms() -> float:
+    """本进程从 fork/exec 到现在的毫秒数（Linux /proc）。
+
+    用来把「解释器启动 + 本模块 import」这段（发生在 main() 之前，perf_counter 抓不到起点）
+    量出来。非 Linux / 读失败一律返回 -1，绝不抛。
+    """
+    try:
+        with open("/proc/self/stat", encoding="utf-8") as f:
+            raw = f.read()
+        # comm 字段可能含空格/括号，按最后一个 ')' 之后切
+        fields = raw[raw.rindex(")") + 2 :].split()
+        starttime_ticks = float(fields[19])  # field 22 (1-based) = starttime
+        hz = float(os.sysconf("SC_CLK_TCK"))
+        with open("/proc/uptime", encoding="utf-8") as f:
+            uptime_s = float(f.read().split()[0])
+        return (uptime_s - starttime_ticks / hz) * 1000.0
+    except Exception:  # noqa: BLE001 — 诊断代码绝不能影响启动
+        return -1.0
+
+
+# 本模块 body 开始执行的时刻：此前是解释器启动 + 上面几个 stdlib import。
+_DIAG["t_module_begin"] = time.perf_counter()
+_DIAG["proc_age_at_module_begin_ms"] = _diag_proc_age_ms()
+
+from kimi_cli import logger  # noqa: E402
+from kimi_cli.agentspec import resolve_subagent_yaml  # noqa: E402
+from kimi_cli.app import KimiCLI, enable_logging  # noqa: E402
+from kimi_cli.cli.mcp import get_global_mcp_config_file  # noqa: E402
+from kimi_cli.exception import MCPConfigError  # noqa: E402
+from kimi_cli.web.runner.mcp_discovery import load_auto_discovered_mcp_configs  # noqa: E402
+from kimi_cli.web.store.sessions import load_session_by_id  # noqa: E402
+
+# 重模块 import（KimiCLI / agentspec / web store …）结束。
+_DIAG["t_module_imports_done"] = time.perf_counter()
 
 # hechun-fork-cci: dedicated worker exit code for "the required agent could not
 # be loaded, refusing to start". The gateway (CCISessionProcess) recognises this
@@ -140,9 +174,15 @@ def _fetch_sandbox_assets() -> None:
         return name == KNOWLEDGE_BUNDLE_PREFIX or name.startswith(KNOWLEDGE_BUNDLE_PREFIX + "/")
 
     try:
+        _t_http0 = time.perf_counter()
         resp = httpx.get(url, headers=headers, timeout=30.0)
         resp.raise_for_status()
         data = resp.content
+        # hechun-diag(warmpool M0): 静态资源「下载」与「解包」分开计时 —— 这正是
+        # spec §1 待验证的那一项（下载到底占 worker_load 多少）。
+        _DIAG["fetch_http_ms"] = (time.perf_counter() - _t_http0) * 1000.0
+        _DIAG["fetch_bytes"] = float(len(data))
+        _t_x0 = time.perf_counter()
         n_kb = 0
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tar:
             members = [m for m in tar.getmembers() if _is_safe_tar_member(m.name)]
@@ -167,6 +207,7 @@ def _fetch_sandbox_assets() -> None:
             wd=str(work_dir),
             home=str(home),
         )
+        _DIAG["fetch_extract_ms"] = (time.perf_counter() - _t_x0) * 1000.0
     except Exception as e:  # noqa: BLE001 — must not crash worker startup
         logger.error(
             "[sandbox-assets] failed to fetch sandbox assets from gateway url={url}: {err}. "
@@ -176,6 +217,82 @@ def _fetch_sandbox_assets() -> None:
         )
 
 
+def _emit_worker_timing(session_id: UUID) -> None:
+    """hechun-diag(warmpool M0): 打一行 worker 冷启动分段耗时。**纯诊断，无控制流影响。**
+
+    两个出口，都是 best-effort（任何异常吞掉）：
+
+    1. ``logger.info`` → Pod 内 ``kimi.log``（enable_logging 已把 fd2 dup2 进日志文件，
+       所以 stderr 那条路在 gateway 侧看不见）。
+    2. stdout 一行**故意非 JSON** 的文本 → gateway 的 read-loop 走 ``json.JSONDecodeError``
+       分支，原样打 ``Invalid JSONRPC out message: <line>`` 进 gateway 日志
+       （``web/runner/process.py:610-611``）——这是唯一能把 worker 内部数字带出 Pod 的现成通道。
+       JSONDecodeError 是被捕获的分支，read-loop 不会因此中断。
+       ⚠️ 该行会先被 ``_broadcast`` 原样转发给 WS 客户端；客户端解析失败会忽略。
+       这是诊断镜像专用，**不得进入 prod**。
+
+    与 gateway 侧 ``cci_process._log_cold_start_timing`` 的 ``worker_load`` 对齐：
+    gateway 用「read-loop 收到的第一行非空 stdout」当就绪锚点，本行正是那一行，
+    故 fetch+import+session+mcp+create 之和应约等于 gateway 打出的 worker_load。
+    """
+    try:
+        d = _DIAG
+
+        def seg(a: str, b: str) -> float:
+            if a not in d or b not in d:
+                return -1.0
+            return (d[b] - d[a]) * 1000.0
+
+        interp_ms = d.get("proc_age_at_module_begin_ms", -1.0)
+        import_ms = seg("t_module_begin", "t_module_imports_done")
+        # module import 结束 → run_worker 开始（main() 里的 enable_logging / proctitle 等）
+        pre_ms = seg("t_module_imports_done", "t_run_begin")
+        fetch_ms = seg("t_run_begin", "t_fetch_done")
+        session_ms = seg("t_fetch_done", "t_session_done")
+        mcpcfg_ms = seg("t_session_done", "t_mcpcfg_done")
+        agent_ms = seg("t_mcpcfg_done", "t_agent_resolve_done")
+        create_ms = seg("t_agent_resolve_done", "t_create_done")
+        run_total_ms = seg("t_run_begin", "t_create_done")
+        proc_total_ms = _diag_proc_age_ms()
+        # KimiCLI.create 内部已有的分段（config / runtime init / load_agent+MCP 建连），
+        # 由 app.py 末尾暴露成模块级变量；原本只进 telemetry，日志里看不到。
+        import kimi_cli.app as _kapp  # noqa: PLC0415
+
+        _cp = getattr(_kapp, "_LAST_CREATE_PHASE_TIMINGS_MS", {}) or {}
+        line = (
+            "[kimo][worker-timing] sid={sid} interp_boot={interp}ms import={imp}ms "
+            "pre_run={pre}ms fetch={fetch}ms (http={fhttp}ms {fbytes}B extract={fx}ms) "
+            "session={sess}ms mcp_cfg={mcp}ms agent_resolve={agent}ms create={create}ms "
+            "run_worker_total={rt}ms proc_total={pt}ms "
+            "| create_breakdown: config={c_cfg}ms runtime_init={c_init}ms "
+            "load_agent_mcp={c_mcp}ms create_total={c_tot}ms"
+        ).format(
+            sid=str(session_id),
+            interp=int(interp_ms),
+            imp=int(import_ms),
+            pre=int(pre_ms),
+            fetch=int(fetch_ms),
+            fhttp=int(d.get("fetch_http_ms", -1.0)),
+            fbytes=int(d.get("fetch_bytes", -1.0)),
+            fx=int(d.get("fetch_extract_ms", -1.0)),
+            sess=int(session_ms),
+            mcp=int(mcpcfg_ms),
+            agent=int(agent_ms),
+            create=int(create_ms),
+            rt=int(run_total_ms),
+            pt=int(proc_total_ms),
+            c_cfg=_cp.get("config_ms", -1),
+            c_init=_cp.get("init_ms", -1),
+            c_mcp=_cp.get("mcp_ms", -1),
+            c_tot=_cp.get("total_ms", -1),
+        )
+        logger.info(line)
+        sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+    except Exception:  # noqa: BLE001 — 诊断绝不能弄崩 worker 启动
+        pass
+
+
 async def run_worker(session_id: UUID) -> None:
     """Run the KimiCLI worker for a session."""
     # hechun-fork-cci: on the CCI path the Pod can't bind-mount the gateway
@@ -183,7 +300,9 @@ async def run_worker(session_id: UUID) -> None:
     # the gateway and unpack them under $HOME BEFORE agent resolution below
     # consumes them. No-op on docker/local (env not injected). Run off-thread:
     # httpx.get is blocking and run_worker drives an asyncio event loop.
+    _DIAG["t_run_begin"] = time.perf_counter()
     await asyncio.to_thread(_fetch_sandbox_assets)
+    _DIAG["t_fetch_done"] = time.perf_counter()
 
     # Find session by ID using the web store (disk-based registry).
     joint_session = load_session_by_id(session_id)
@@ -251,6 +370,8 @@ async def run_worker(session_id: UUID) -> None:
             session.state.approval.yolo = True
             logger.info("CCI fresh session yolo=True from KIMO_DEFAULT_YOLO env fallback")
 
+    _DIAG["t_session_done"] = time.perf_counter()
+
     # Load default MCP config file if it exists
     default_mcp_file = get_global_mcp_config_file()
     mcp_configs: list[dict[str, Any]] = []
@@ -277,6 +398,7 @@ async def run_worker(session_id: UUID) -> None:
     auto_mcp_configs = load_auto_discovered_mcp_configs()
     if auto_mcp_configs:
         mcp_configs.extend(auto_mcp_configs)
+    _DIAG["t_mcpcfg_done"] = time.perf_counter()
 
     # Detect whether this is a resumed session (has prior state on disk)
     # vs a brand-new session that should honor config.default_plan_mode.
@@ -360,6 +482,8 @@ async def run_worker(session_id: UUID) -> None:
             "(~/.kimi/agents/<name>.yaml via the sandbox-assets bundle)."
         )
 
+    _DIAG["t_agent_resolve_done"] = time.perf_counter()
+
     # Create KimiCLI instance with MCP configuration
     try:
         kimi_cli = await KimiCLI.create(
@@ -384,6 +508,9 @@ async def run_worker(session_id: UUID) -> None:
             thinking=session_thinking,
             agent_file=agent_file,
         )
+
+    _DIAG["t_create_done"] = time.perf_counter()
+    _emit_worker_timing(session_id)
 
     # Run in wire stdio mode
     await kimi_cli.run_wire_stdio()

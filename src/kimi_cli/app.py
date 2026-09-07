@@ -49,6 +49,10 @@ def _patch_session_id(record: dict[str, Any]) -> None:
         record["extra"].setdefault("sid", "")
 
 
+# hechun-diag(warmpool M0): 最近一次 KimiCLI.create 的分段耗时（ms）。诊断用，见 create() 末尾。
+_LAST_CREATE_PHASE_TIMINGS_MS: dict[str, int] = {}
+
+
 def enable_logging(debug: bool = False, *, redirect_stderr: bool = True) -> None:
     # NOTE: stderr redirection is implemented by swapping the process-level fd=2 (dup2).
     # That can hide Click/Typer error output during CLI startup, so some entrypoints delay
@@ -372,6 +376,13 @@ class KimiCLI:
             init_ms=_phase_timings_ms.get("init_ms", 0),
             mcp_ms=_phase_timings_ms.get("mcp_ms", 0),
         )
+
+        # hechun-diag(warmpool M0): 把已有的 startup_perf 分段（config / runtime init /
+        # load_agent+MCP）暴露成模块级变量，供 worker 的 [kimo][worker-timing] 一行汇总读取。
+        # 原本只进 telemetry track()，日志里看不到。纯诊断，不改控制流。
+        global _LAST_CREATE_PHASE_TIMINGS_MS  # noqa: PLW0603
+        _LAST_CREATE_PHASE_TIMINGS_MS = dict(_phase_timings_ms)
+        _LAST_CREATE_PHASE_TIMINGS_MS["total_ms"] = int((time.monotonic() - _create_t0) * 1000)
 
         return KimiCLI(soul, runtime, env_overrides, bg_refresh_task)
 
