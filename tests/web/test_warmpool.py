@@ -383,6 +383,23 @@ class TestRestartReconcile:
             await mgr.close()
 
 
+class TestRefillLoop:
+    async def test_the_pool_is_filled_immediately_on_start(self):
+        """No "empty for one interval" window after a gateway restart."""
+        spawner = FakeSpawner()
+        store = FakeStore()
+        mgr = _manager(spawner, store, refill_interval_s=3600)
+        await mgr.start()
+        try:
+            for _ in range(200):
+                if mgr.stats()["pooled"]:
+                    break
+                await asyncio.sleep(0.01)
+            assert mgr.stats()["pooled"] == 1
+        finally:
+            await mgr.close()
+
+
 class TestProbe:
     async def test_live_pod_pongs_and_stays(self):
         spawner = FakeSpawner()

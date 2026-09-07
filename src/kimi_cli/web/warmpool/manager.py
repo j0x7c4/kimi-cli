@@ -186,14 +186,22 @@ class WarmPoolManager:
             await self._discard(pod, reason="gateway_shutdown")
 
     async def _refill_loop(self) -> None:
+        """Fill the pool now, then keep it topped up.
+
+        The first pass runs immediately rather than after one interval:
+        otherwise every gateway restart leaves a window in which the pool is
+        empty for no reason and every session in it pays the full cold start.
+        """
         while True:
             try:
-                await asyncio.sleep(max(1, self._backoff_s or self._refill_interval_s))
                 await self.refill()
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 — the loop must never die
                 logger.warning("[warmpool] refill pass errored (continuing): {err}", err=e)
+            # Backoff (set by a failed warm-up) takes precedence over the
+            # steady-state interval, so a broken CCI is retried ever more slowly.
+            await asyncio.sleep(max(1, self._backoff_s or self._refill_interval_s))
 
     # ── refill ───────────────────────────────────────────────────────────────
 

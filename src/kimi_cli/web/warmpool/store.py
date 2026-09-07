@@ -141,22 +141,32 @@ class WarmPoolStore:
         """
         from sqlalchemy import text  # noqa: PLC0415
 
-        with self._engine.begin() as conn:
-            res = conn.execute(
-                text(
-                    f"UPDATE {TABLE} SET state=:ready, pod_ip=:ip, endpoint=:ep, "
-                    "last_health_at=now(6) "
-                    "WHERE pod_name=:pod AND state=:warming"
-                ),
-                {
-                    "ready": STATE_READY,
-                    "warming": STATE_WARMING,
-                    "ip": pod_ip,
-                    "ep": endpoint,
-                    "pod": pod_name,
-                },
-            )
-            return res.rowcount == 1
+        try:
+            with self._engine.begin() as conn:
+                res = conn.execute(
+                    text(
+                        f"UPDATE {TABLE} SET state=:ready, pod_ip=:ip, endpoint=:ep, "
+                        "last_health_at=now(6) "
+                        "WHERE pod_name=:pod AND state=:warming"
+                    ),
+                    {
+                        "ready": STATE_READY,
+                        "warming": STATE_WARMING,
+                        "ip": pod_ip,
+                        "ep": endpoint,
+                        "pod": pod_name,
+                    },
+                )
+                return res.rowcount == 1
+        except Exception as e:  # noqa: BLE001 — 1213 only; see _is_deadlock
+            if _is_deadlock(e):
+                logger.info(
+                    "[warmpool] mark_ready({pod}) lost an InnoDB deadlock (1213); "
+                    "discarding the Pod instead of pooling it",
+                    pod=pod_name,
+                )
+                return False
+            raise
 
     def claim(self, session_id: str, owner_id: str) -> dict[str, Any] | None:
         """Atomically claim the oldest ready Pod for ``session_id``.
