@@ -835,6 +835,15 @@ def main() -> None:
     # Enable logging for the subprocess
     enable_logging(debug=False)
 
+    # hechun-fork-cci: enable_logging installs a FILE sink only (and dup2's fd 2
+    # into it), so on CCI every runtime warning dies inside the Pod. Forward
+    # WARNING+ to the gateway over the diag frame channel when
+    # KIMO_WORKER_TRACE is on — see worker_diag for why this is gated, bounded
+    # and non-recursive.
+    from kimi_cli.web.runner.worker_diag import install_log_forwarding  # noqa: PLC0415
+
+    install_log_forwarding(logger)
+
     # Run the async worker
     try:
         if warm:

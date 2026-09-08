@@ -79,6 +79,50 @@ def _is_initialize_frame(message: str) -> bool:
 _DIAG_FRAME_KEY = "kimo_diag"
 
 
+def wire_signal(params: object) -> str | None:
+    """One-line description of a worker→gateway *request*, or ``None`` to stay quiet.
+
+    hechun-fork-cci. These frames already flow through the gateway — they are
+    just never logged, which is why a wedged session looks like "the worker
+    stopped talking" when in fact it said exactly what it was waiting for.
+    2026-09-08: a session sat at ``state=busy`` for five minutes; the prime
+    suspect (an approval request that nobody answers — ``wait_for_response``
+    has no timeout) would have been one line in the log if this existed.
+
+    Only *requests* are described, never events: events carry per-token content
+    parts, so logging them would flood the log and copy user text into it. What
+    is logged here is a type plus ids/names — no arguments, no message bodies.
+    """
+    from kimi_cli.wire.types import (  # noqa: PLC0415
+        ApprovalRequest,
+        MemoryOpRequest,
+        QuestionRequest,
+        ToolCallRequest,
+    )
+
+    match params:
+        case ApprovalRequest():
+            # 🔴 The one that blocks forever: soul/approval.py waits on a future
+            # with timeout=None, so an unanswered approval wedges the turn with
+            # no further output of any kind.
+            return (
+                f"approval_request action={params.action!r} "
+                f"tool_call_id={params.tool_call_id} — worker is now BLOCKED "
+                f"until a client answers (no timeout)"
+            )
+        case QuestionRequest():
+            return (
+                f"question_request tool_call_id={params.tool_call_id} "
+                f"— worker blocked on user answer"
+            )
+        case ToolCallRequest():
+            return f"tool_call_request name={params.name!r} id={params.id}"
+        case MemoryOpRequest():
+            return f"memory_op_request op={getattr(params, 'op', '?')}"
+        case _:
+            return None
+
+
 def _diag_frame(message: str) -> dict | None:
     """Return the decoded diagnostic frame for ``message``, else ``None``.
 
@@ -681,6 +725,12 @@ class SessionProcess:
                 if was_busy and not self.is_busy:
                     await self._emit_status("idle", reason="prompt_error")
             case JSONRPCRequestMessage():
+                # hechun-fork-cci: log what the worker is waiting on before
+                # dispatching. Silence here is what made the 2026-09-08 busy
+                # wedge undiagnosable.
+                signal = wire_signal(message.params)
+                if signal is not None:
+                    logger.info("[kimo][wire] sid={sid} {sig}", sid=self.session_id, sig=signal)
                 # hechun-fork-cci (方案 B): the CCI worker cannot reach RDS, so it
                 # delegates persistent-memory writes/reads to us (the gateway,
                 # which CAN reach RDS) over the wire. We answer MemoryOpRequest

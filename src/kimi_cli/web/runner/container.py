@@ -238,6 +238,11 @@ _SANDBOX_ENV_VARS = [
     # 门控恒假、`[kimo][worker-diag]` 一条都没有，表现为「开关配了等于没配」。
     # 这是「配置写了却没生效」的第三种形态：最后一跳被白名单挡掉。
     "KIMO_WORKER_TIMING",
+    # 运行期日志回流（worker_diag）：Pod 内 kimi.log 在 gateway 侧不可见，这两个
+    # env 打开后把 WARNING+ 的记录经 kimo_diag 帧送回 gateway 日志。与上面同理，
+    # 不进这份白名单就到不了 Pod。
+    "KIMO_WORKER_TRACE",
+    "KIMO_WORKER_TRACE_LEVEL",
 ]
 
 
