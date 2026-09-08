@@ -233,6 +233,11 @@ _SANDBOX_ENV_VARS = [
     # CCI fresh session 的 yolo 兜底：storage 读回失败时 worker.py 从此 env 把 approval.yolo
     # 置 True（否则 headless iOS/Flutter session 的工具调用卡在 approval 无限等待）。
     "KIMO_DEFAULT_YOLO",
+    # W5 后记（2026-09-07 实测）：worker 侧的 kimo_diag 分段计时门控读这个 env。
+    # 它一度渲染进了 gateway 容器却**没有到 Pod**——因为不在这份白名单里，于是
+    # 门控恒假、`[kimo][worker-diag]` 一条都没有，表现为「开关配了等于没配」。
+    # 这是「配置写了却没生效」的第三种形态：最后一跳被白名单挡掉。
+    "KIMO_WORKER_TIMING",
 ]
 
 

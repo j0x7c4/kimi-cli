@@ -62,6 +62,7 @@ ENV_REFILL_INTERVAL = "KIMO_WARMPOOL_REFILL_INTERVAL_SECONDS"
 ENV_READY_TIMEOUT = "KIMO_WARMPOOL_READY_TIMEOUT_SECONDS"
 ENV_BIND_TIMEOUT = "KIMO_WARMPOOL_BIND_TIMEOUT_SECONDS"
 ENV_PING_TIMEOUT = "KIMO_WARMPOOL_PING_TIMEOUT_SECONDS"
+ENV_KEEPALIVE_INTERVAL = "KIMO_WARMPOOL_KEEPALIVE_INTERVAL_SECONDS"
 
 DEFAULT_AGENT = "diabetes-expert"
 
@@ -70,6 +71,21 @@ DEFAULT_AGENT = "diabetes-expert"
 #: forever (spec §8.4).
 _BACKOFF_START_S = 30
 _BACKOFF_CAP_S = 900
+
+#: Keepalive interval (seconds). The exec stream that carries the warm
+#: handshake dies after roughly 5–6 minutes of silence (2026-09-07: the single
+#: ``probe_failed`` we saw happened in the 6.5-minute window where the backend
+#: had not yet been deployed and nobody was pinging). 60s is well inside that
+#: and is the cadence already proven to hold the stream open.
+_KEEPALIVE_INTERVAL_S = 60
+
+#: :meth:`WarmPoolManager._warm_one` outcomes. ``SKIPPED`` is not a failure: it
+#: means the pool is already at capacity according to the DB (another gateway,
+#: or an in-flight row this process cannot see), so it must NOT trip the backoff
+#: that exists for a broken CCI.
+_WARM_OK = "warmed"
+_WARM_FAILED = "failed"
+_WARM_SKIPPED = "skipped"
 
 
 class WarmPod:
@@ -104,6 +120,7 @@ class WarmPoolManager:
         ready_timeout_s: float = 120.0,
         bind_timeout_s: float = 20.0,
         ping_timeout_s: float = 10.0,
+        keepalive_interval_s: int = _KEEPALIVE_INTERVAL_S,
     ) -> None:
         self._spawner = spawner
         self._store = store
@@ -118,10 +135,18 @@ class WarmPoolManager:
         self._ready_timeout_s = ready_timeout_s
         self._bind_timeout_s = bind_timeout_s
         self._ping_timeout_s = ping_timeout_s
+        self._keepalive_interval_s = keepalive_interval_s
 
         self._pods: dict[str, WarmPod] = {}
         self._lock = asyncio.Lock()
+        #: Serialises the whole "decide how many are missing → create them"
+        #: critical section. ``_lock`` only guards reads/writes of ``_pods`` and
+        #: is therefore useless here: the decision is made *outside* it and a
+        #: warm-up takes 20–30s, so two triggers could both read "0 < 1" and
+        #: each start a Pod (observed on test, 2026-09-07).
+        self._refill_lock = asyncio.Lock()
         self._refill_task: asyncio.Task[None] | None = None
+        self._keepalive_task: asyncio.Task[None] | None = None
         self._backoff_s = 0
         self._hits = 0
         self._misses = 0
@@ -140,6 +165,12 @@ class WarmPoolManager:
     @classmethod
     def agent_from_env(cls) -> str:
         return (os.environ.get(ENV_AGENT) or DEFAULT_AGENT).strip() or DEFAULT_AGENT
+
+    @classmethod
+    def keepalive_interval_from_env(cls) -> int:
+        """Seconds between self-keepalive passes; ``0`` disables them."""
+        raw = (os.environ.get(ENV_KEEPALIVE_INTERVAL) or "").strip()
+        return int(raw) if raw.isdigit() else _KEEPALIVE_INTERVAL_S
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -165,20 +196,25 @@ class WarmPoolManager:
             logger.warning("[warmpool] startup reconcile failed (continuing): {err}", err=e)
 
         self._refill_task = asyncio.create_task(self._refill_loop())
+        if self._keepalive_interval_s > 0:
+            self._keepalive_task = asyncio.create_task(self._keepalive_loop())
         logger.info(
-            "[warmpool] started size={n} agent={a} refill_interval={i}s",
+            "[warmpool] started size={n} agent={a} refill_interval={i}s keepalive={k}s",
             n=self._size,
             a=self._agent,
             i=self._refill_interval_s,
+            k=self._keepalive_interval_s or "off",
         )
 
     async def close(self) -> None:
         """Cancel the refill loop and release every Pod still in the pool."""
-        if self._refill_task is not None:
-            self._refill_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._refill_task
-            self._refill_task = None
+        for attr in ("_refill_task", "_keepalive_task"):
+            task = getattr(self, attr)
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+                setattr(self, attr, None)
         async with self._lock:
             pods = list(self._pods.values())
             self._pods.clear()
@@ -203,27 +239,76 @@ class WarmPoolManager:
             # steady-state interval, so a broken CCI is retried ever more slowly.
             await asyncio.sleep(max(1, self._backoff_s or self._refill_interval_s))
 
+    async def _keepalive_loop(self) -> None:
+        """Keep the manager's own Pods alive. **The gateway owns this, not the backend.**
+
+        🔴 Do not delete this in favour of the backend health-check endpoint.
+        Until 2026-09-07 the only thing pinging warm Pods was the backend's 60s
+        sweep, which made two supposedly independent switches secretly coupled:
+        with ``AI_WARMPOOL_ENABLED=false`` — or simply while the backend was
+        restarting — the exec stream went silent, died after ~5–6 minutes, the
+        Pod was evicted and refilled, and the pool churned CCI Pods for nothing
+        with no one watching. Whoever holds a Pod is responsible for keeping it
+        alive; the backend sweep is now an *external* check (dirty-row reclaim),
+        not the lifeline.
+        """
+        while True:
+            await asyncio.sleep(self._keepalive_interval_s)
+            try:
+                await self.probe()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 — the loop must never die
+                logger.warning("[warmpool] keepalive pass errored (continuing): {err}", err=e)
+
     # ── refill ───────────────────────────────────────────────────────────────
 
     async def refill(self) -> int:
-        """Top the pool back up to ``size``. Returns how many Pods were warmed."""
+        """Top the pool back up to ``size``. Returns how many Pods were warmed.
+
+        Refill has four triggers that do not coordinate with each other (startup,
+        the 30s loop, every claim, the backend health sweep) and one pass takes
+        20–30s. Two of them arriving in the same window used to each start a Pod,
+        because the capacity test counted only Pods that had already reported
+        ready — the one being created was invisible. Two guards now cover the two
+        halves of that: ``_refill_lock`` makes the passes in *this* process
+        strictly sequential (so an in-flight Pod is never raced by a sibling
+        trigger), and the DB capacity check in :meth:`_warm_one` covers everyone
+        else, because the ``warming`` row — written the moment a warm-up starts —
+        is exactly the in-flight state that memory cannot see.
+
+        A pass that arrives while another is running returns 0 rather than
+        queueing: by the time the running one finishes, the pool is full, and a
+        queued pass would only add latency to whoever awaited it.
+        """
+        if self._refill_lock.locked():
+            logger.debug("[warmpool] refill already in progress; skipping this trigger")
+            return 0
         warmed = 0
-        while len(self._pods) < self._size:
-            ok = await self._warm_one()
-            if not ok:
-                self._backoff_s = min(_BACKOFF_CAP_S, (self._backoff_s * 2) or _BACKOFF_START_S)
-                logger.warning(
-                    "[warmpool] warm-up failed; backing off {s}s before the next attempt",
-                    s=self._backoff_s,
-                )
-                break
-            self._backoff_s = 0
-            warmed += 1
+        async with self._refill_lock:
+            while len(self._pods) < self._size:
+                outcome = await self._warm_one()
+                if outcome == _WARM_SKIPPED:
+                    break
+                if outcome == _WARM_FAILED:
+                    self._backoff_s = min(_BACKOFF_CAP_S, (self._backoff_s * 2) or _BACKOFF_START_S)
+                    logger.warning(
+                        "[warmpool] warm-up failed; backing off {s}s before the next attempt",
+                        s=self._backoff_s,
+                    )
+                    break
+                self._backoff_s = 0
+                warmed += 1
         await self._publish_size_metrics()
         return warmed
 
-    async def _warm_one(self) -> bool:
-        """Create one Pod, run the two-phase worker, and pool it when ready."""
+    async def _warm_one(self) -> str:
+        """Create one Pod, run the two-phase worker, and pool it when ready.
+
+        Returns one of ``_WARM_OK`` / ``_WARM_FAILED`` / ``_WARM_SKIPPED``.
+        """
+        if not await self._db_capacity_available():
+            return _WARM_SKIPPED
         pod_name = new_pod_name()
         placeholder = new_placeholder_session_id()
         handle = None
@@ -232,7 +317,7 @@ class WarmPoolManager:
             await asyncio.to_thread(self._store.insert_warming, pod_name, placeholder)
         except Exception as e:  # noqa: BLE001
             logger.warning("[warmpool] insert warming row failed: {err}", err=e)
-            return False
+            return _WARM_FAILED
         try:
             env = dict(self._env_builder())
             handle = await self._spawner.spawn(uuid4(), "", env, warm=True, pod_name=pod_name)
@@ -248,7 +333,7 @@ class WarmPoolManager:
                     r=reason,
                 )
                 await self._fail_pod(pod_name, handle, stream, reason=str(reason))
-                return False
+                return _WARM_FAILED
             # 🔴 ``ok`` is the worker's own verification that the agent spec is on
             # disk — not merely "the process started". _fetch_sandbox_assets logs
             # download failures without raising, so a Pod can boot fine and still
@@ -266,7 +351,7 @@ class WarmPoolManager:
                     pod=pod_name,
                 )
                 await self._release_pod(handle, stream)
-                return False
+                return _WARM_FAILED
             async with self._lock:
                 self._pods[pod_name] = WarmPod(pod_name, handle, stream, self._agent)
             logger.info(
@@ -275,11 +360,11 @@ class WarmPoolManager:
                 a=ready.get("agent"),
                 ms=ready.get("prepare_ms"),
             )
-            return True
+            return _WARM_OK
         except Exception as e:  # noqa: BLE001 — a failed warm-up is never fatal
             logger.warning("[warmpool] warm-up of {pod} failed: {err}", pod=pod_name, err=e)
             await self._fail_pod(pod_name, handle, stream, reason="warm_spawn_failed")
-            return False
+            return _WARM_FAILED
 
     # ── claim ────────────────────────────────────────────────────────────────
 
@@ -428,6 +513,10 @@ class WarmPoolManager:
         The probe cannot use the wire protocol: it has no ``ping`` method, and a
         pre-bind worker has no soul to answer any JSON-RPC at all. Hence the warm
         handshake's own ping/pong.
+
+        This is also what keeps the exec stream open (see :meth:`_keepalive_loop`),
+        so it runs on the gateway's own timer. The backend's health-check endpoint
+        calls it too, but only as an external check — never as the lifeline.
         """
         async with self._lock:
             pods = list(self._pods.values())
@@ -514,6 +603,33 @@ class WarmPoolManager:
                     detail=frame.get("detail"),
                 )
                 return None
+
+    async def _db_capacity_available(self) -> bool:
+        """Is there room for one more Pod according to the DB?
+
+        The in-memory counters only see this process. ``kimo_sandbox_pod`` is
+        shared by every writer (a second gateway instance, the backend sweep),
+        and a ``warming`` row exists from the first moment of a warm-up — so the
+        table, not the manager, is the authority on how many Pods are live.
+
+        A DB that cannot be read must not stop the pool from working: on error
+        this returns True and the in-memory guard stands alone.
+        """
+        try:
+            live = await asyncio.to_thread(self._store.list_by_states, (STATE_WARMING, STATE_READY))
+        except Exception as e:  # noqa: BLE001 — never block a warm-up on metrics-grade IO
+            logger.debug("[warmpool] capacity check unavailable ({err}); proceeding", err=e)
+            return True
+        if len(live) >= self._size:
+            logger.warning(
+                "[warmpool] {n} live row(s) (warming+ready) already at size={s}; "
+                "skipping this warm-up (names={names})",
+                n=len(live),
+                s=self._size,
+                names=", ".join(str(r.get("pod_name")) for r in live[:5]),
+            )
+            return False
+        return True
 
     async def _fail_pod(self, pod_name: str, handle: Any, stream: Any, *, reason: str) -> None:
         """Mark the row dead and delete the Pod (best-effort, never raises)."""

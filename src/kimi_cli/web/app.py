@@ -338,6 +338,7 @@ async def _build_warm_pool(app: FastAPI) -> Any | None:
             agent=agent,
             metrics=getattr(app.state, "metrics", None),
             refill_interval_s=_int_env("KIMO_WARMPOOL_REFILL_INTERVAL_SECONDS", default=30),
+            keepalive_interval_s=WarmPoolManager.keepalive_interval_from_env(),
         )
         await pool.start()
         return pool

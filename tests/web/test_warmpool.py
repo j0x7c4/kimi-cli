@@ -400,6 +400,130 @@ class TestRefillLoop:
             await mgr.close()
 
 
+class TestRefillConcurrency:
+    """The pool must hold exactly ``size`` Pods, however many triggers fire.
+
+    2026-09-07 on test: ``SIZE=1`` yet two ready Pods (2vCPU/4GiB each) sat in
+    the pool. Not a missing bound — ``self._pods`` only contains Pods that have
+    already reported ready, and a warm-up takes 20–30s, so the Pod being created
+    was invisible to the very check meant to stop a second one. Four triggers
+    (startup / the 30s loop / every claim / the backend sweep) share no lock, so
+    two of them each saw "0 < 1". The multi-Pod state is not self-healing either:
+    the pool never evicts by age, so under low traffic the extra Pod just stays.
+    """
+
+    class SlowSpawner(FakeSpawner):
+        """Models the real 20–30s gap between "spawn started" and "ready"."""
+
+        def __init__(self, gate: asyncio.Event):
+            super().__init__()
+            self._gate = gate
+
+        async def spawn(self, sid, owner_id, env, *, warm=False, pod_name=None):
+            handle = await super().spawn(sid, owner_id, env, warm=warm, pod_name=pod_name)
+            await self._gate.wait()
+            return handle
+
+    async def test_concurrent_refills_warm_exactly_one_pod(self):
+        gate = asyncio.Event()
+        spawner = self.SlowSpawner(gate)
+        store = FakeStore()
+        mgr = _manager(spawner, store, size=1)
+
+        passes = [asyncio.create_task(mgr.refill()) for _ in range(4)]
+        await asyncio.sleep(0)  # let all four reach the capacity check
+        gate.set()
+        results = await asyncio.gather(*passes)
+
+        assert len(spawner.spawned) == 1, f"over-provisioned: {spawner.spawned}"
+        assert sum(results) == 1  # exactly one pass reports the warm-up
+        assert mgr.stats()["pooled"] == 1
+        assert [r["state"] for r in store.rows.values()] == [STATE_READY]
+
+    async def test_a_trigger_arriving_mid_warmup_does_not_add_a_pod(self):
+        """The claim path fires ``refill()`` while the previous one is in flight."""
+        gate = asyncio.Event()
+        spawner = self.SlowSpawner(gate)
+        mgr = _manager(spawner, FakeStore(), size=1)
+
+        first = asyncio.create_task(mgr.refill())
+        await asyncio.sleep(0)
+        # wait_for, not a bare await: without the guard this second trigger runs
+        # its own warm-up and blocks on the gate — the failure would be a hang,
+        # which reads as CI flake rather than "the fix is gone".
+        assert await asyncio.wait_for(mgr.refill(), timeout=1.0) == 0
+        gate.set()
+        assert await first == 1
+        assert len(spawner.spawned) == 1
+
+    async def test_rows_from_another_writer_count_against_size(self):
+        """The DB, not this process's memory, is the authority on how many are live.
+
+        A second gateway (or a row this process no longer holds) is invisible to
+        ``_pods``; only ``kimo_sandbox_pod`` sees everything that is warming or
+        ready.
+        """
+        spawner = FakeSpawner()
+        store = FakeStore()
+        store.insert_warming("kimo-sandbox-foreign", "placeholder")
+        store.mark_ready("kimo-sandbox-foreign", pod_ip="10.0.0.9", endpoint="ws://x")
+        mgr = _manager(spawner, store, size=1)
+
+        assert await mgr.refill() == 0
+        assert spawner.spawned == []  # no Pod created…
+        assert mgr.stats()["backoff_s"] == 0  # …and this is not a failure
+
+
+class TestKeepalive:
+    """The gateway keeps its own Pods alive; the backend is not the lifeline.
+
+    Before this, the only thing pinging warm Pods was the backend's 60s health
+    sweep — so ``AI_WARMPOOL_ENABLED=false``, or a plain backend restart, left
+    the exec stream silent until it died (~5–6 min), the Pod was evicted, a new
+    one warmed, and the cycle repeated: CCI Pods burned for nothing, with no
+    signal anyone would look at. The two switches were documented as independent
+    and were not.
+    """
+
+    async def test_pooled_pods_are_pinged_with_no_external_trigger(self):
+        spawner = FakeSpawner()
+        store = FakeStore()
+        mgr = _manager(spawner, store, refill_interval_s=3600, keepalive_interval_s=1)
+        object.__setattr__(mgr, "_keepalive_interval_s", 0.02)
+        await mgr.start()
+        try:
+            for _ in range(200):
+                pod = next(iter(mgr._pods.values()), None)
+                if pod is not None and store.rows[pod.pod_name].get("last_health_at"):
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                pytest.fail("no keepalive ping was answered")
+            # A real ping frame on the stream, not merely a health-row touch.
+            assert any(
+                (wp.decode(w) or {}).get(wp.WARM_KEY) == wp.FRAME_PING for w in pod.stream.written
+            )
+        finally:
+            await mgr.close()
+
+    async def test_keepalive_can_be_switched_off(self):
+        mgr = _manager(FakeSpawner(), FakeStore(), refill_interval_s=3600, keepalive_interval_s=0)
+        await mgr.start()
+        try:
+            assert mgr._keepalive_task is None
+        finally:
+            await mgr.close()
+
+    async def test_close_cancels_the_keepalive_task(self):
+        mgr = _manager(FakeSpawner(), FakeStore(), refill_interval_s=3600, keepalive_interval_s=1)
+        await mgr.start()
+        task = mgr._keepalive_task
+        assert task is not None
+        await mgr.close()
+        assert task.cancelled() or task.done()
+        assert mgr._keepalive_task is None
+
+
 class TestProbe:
     async def test_live_pod_pongs_and_stays(self):
         spawner = FakeSpawner()
