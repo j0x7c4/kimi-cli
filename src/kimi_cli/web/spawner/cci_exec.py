@@ -184,6 +184,37 @@ class KimoExecStream:
         # WSClient.write_stdin handles the channel-0 prefix framing.
         self._ws.write_stdin(data.decode("utf-8") if isinstance(data, (bytes, bytearray)) else data)
 
+    async def keepalive(self) -> None:
+        """Send one zero-length stdin frame purely to keep the exec stream alive.
+
+        🔴 Why this exists (2026-09-08, four samples on prod + test): the CCI exec
+        WebSocket is closed by the far side after **exactly 5 minutes** of no
+        traffic. It is an *idle* timer, not a connection age limit — prod
+        2026-09-06 died 5m00s after its last frame, not 5m00s after connecting.
+        We never noticed because nothing on our side pings: ``create_connection``
+        is followed by ``settimeout(None)`` and there is no ping/pong anywhere in
+        this file. So a user who pauses for five minutes comes back to a dead
+        stream: their next message lands in a closed socket, produces no turn at
+        all (and an unfinished turn is never persisted, so it vanishes), and the
+        session ends up reclaimed in ``error``.
+
+        Why a zero-length channel-0 frame rather than a WebSocket PING:
+        ``write_channel`` sends ``chr(0) + data``, so an empty payload still puts
+        a real frame on the wire, and the API server forwards **zero bytes** to
+        the worker's stdin — invisible to the JSON-RPC framing, no protocol
+        change, nothing for the worker to parse. A WS-level PING would be even
+        cheaper but only resets timers that live at the WS/LB layer; if the far
+        side counts *exec channel* traffic instead, a PING would not help and the
+        stream would still die. This frame satisfies both readings.
+
+        Safe to call while the read loop is blocked: reads run in a worker thread
+        (``asyncio.to_thread``) and ``send_frame`` takes the socket's own lock —
+        the same concurrency the existing ``sendall`` has always relied on.
+        """
+        if self._ws is None:
+            raise RuntimeError("KimoExecStream.keepalive before connect")
+        self._ws.write_stdin("")
+
     async def recv(self, n: int = -1) -> bytes:
         """Read one demuxed stdout (channel 1) chunk, like docker attach_socket().
 

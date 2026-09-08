@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import time
 from typing import Any
 from uuid import UUID, uuid4
@@ -125,6 +126,21 @@ def _resolve_bind_identity(session_id: UUID, env: dict[str, str]) -> tuple[str, 
     return owner_id, yolo
 
 
+#: Seconds between exec-stream keepalive pokes. Overridable via
+#: ``KIMO_SESSION_KEEPALIVE_SECONDS`` (0 disables). Default 60s: the far side
+#: closes an idle exec WebSocket at exactly 5 minutes (four samples, prod+test
+#: 2026-09-08), and 60s is the cadence already proven on pooled Pods.
+_DEFAULT_SESSION_KEEPALIVE_S = 60
+_ENV_SESSION_KEEPALIVE = "KIMO_SESSION_KEEPALIVE_SECONDS"
+
+
+def _keepalive_interval_from_env() -> int:
+    raw = (os.environ.get(_ENV_SESSION_KEEPALIVE) or "").strip()
+    if raw.isdigit():
+        return int(raw)
+    return _DEFAULT_SESSION_KEEPALIVE_S
+
+
 class CCISessionProcess(SessionProcess):
     """SessionProcess whose worker runs in a CCI Pod, driven over exec WebSocket.
 
@@ -160,6 +176,12 @@ class CCISessionProcess(SessionProcess):
         # worker 首行 stdout 时补 T3 并打一行汇总。热复用（start 提前返回）不填、不打。
         self._cold_start_marks: tuple[float, float, float] | None = None
         self._cold_start_timing_pending: bool = False
+        # Idle keepalive for the exec stream (see _start_keepalive). 60s matches
+        # the cadence already proven to hold a pooled Pod's stream open for 10+
+        # minutes; the far side closes an idle exec WS at exactly 5 minutes.
+        # 0 disables (escape hatch, not a default).
+        self._keepalive_interval_s: int = _keepalive_interval_from_env()
+        self._keepalive_task: asyncio.Task[None] | None = None
 
     @property
     def handle(self) -> SandboxHandle | None:
@@ -376,6 +398,7 @@ class CCISessionProcess(SessionProcess):
             if self.is_alive:
                 if self._read_task is None or self._read_task.done():
                     self._read_task = asyncio.create_task(self._read_loop())
+                self._start_keepalive()
                 return
 
             self._in_flight_prompt_ids.clear()
@@ -398,9 +421,7 @@ class CCISessionProcess(SessionProcess):
                 self._exec_stream = stream
                 _timing_t1 = _timing_t2 = time.perf_counter()
             else:
-                logger.info(
-                    "Spawning CCI sandbox for session {sid}", sid=self.session_id
-                )
+                logger.info("Spawning CCI sandbox for session {sid}", sid=self.session_id)
                 self._handle = await self._spawner.spawn(
                     self.session_id, env.get("KIMI_USER_ID", ""), env
                 )
@@ -414,6 +435,7 @@ class CCISessionProcess(SessionProcess):
             self._cold_start_timing_pending = True
 
             self._read_task = asyncio.create_task(self._read_loop())
+            self._start_keepalive()
             # hechun-fork-cci: a fresh Pod worker was just spawned (this happens
             # every few minutes as CCI recycles the Pod / drops the exec stream).
             # Re-declare the client's capabilities to it FIRST — before any prompt —
@@ -456,6 +478,8 @@ class CCISessionProcess(SessionProcess):
                 self._handle = None
             await self._retire_adopted_row(reason=reason or "stop")
 
+            await self._stop_keepalive()
+
             if self._read_task is not None:
                 self._read_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -467,6 +491,57 @@ class CCISessionProcess(SessionProcess):
             self._expecting_exit = False
             if emit_status:
                 await self._emit_status("stopped", reason=reason or "stop")
+
+    # ── exec stream keepalive ─────────────────────────────────────────────────
+
+    def _start_keepalive(self) -> None:
+        """(Re)start the idle keepalive for this session's exec stream.
+
+        🔴 The session that a user is actually talking to needs this MORE than a
+        pooled Pod does, and until 2026-09-08 only the pool had it. The exec
+        stream dies after exactly 5 minutes of silence (see
+        ``KimoExecStream.keepalive``), so any pause longer than that left the
+        user's next message landing in a closed socket — no turn, nothing
+        persisted, session reclaimed in ``error``. Meanwhile
+        ``AI_CHAT_IDLE_TTL_SECONDS`` promises an hour of session reuse. The pool
+        keeps its own Pods alive on the same 60s cadence; this is the other half
+        of "whoever holds a Pod keeps it alive" — the half that was missing.
+        """
+        if self._keepalive_interval_s <= 0:
+            return
+        if self._keepalive_task is not None and not self._keepalive_task.done():
+            return
+        self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+
+    async def _stop_keepalive(self) -> None:
+        task = self._keepalive_task
+        self._keepalive_task = None
+        if task is None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    async def _keepalive_loop(self) -> None:
+        """Poke the exec stream every ``interval`` seconds. Never raises."""
+        while True:
+            await asyncio.sleep(self._keepalive_interval_s)
+            stream = self._exec_stream
+            if stream is None:
+                continue
+            try:
+                await stream.keepalive()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 — a failed poke must not kill the session
+                # Not an error by itself: the stream may have died for unrelated
+                # reasons and the read loop owns that path. Log once at debug so
+                # a storm of pokes on a dead stream stays quiet.
+                logger.debug(
+                    "[CCISessionProcess] keepalive poke failed sid={sid}: {err}",
+                    sid=self.session_id,
+                    err=e,
+                )
 
     # ── warm pool adoption ────────────────────────────────────────────────────
 
@@ -491,9 +566,7 @@ class CCISessionProcess(SessionProcess):
         if pool is None:
             return None
         try:
-            owner_id, yolo = await asyncio.to_thread(
-                _resolve_bind_identity, self.session_id, env
-            )
+            owner_id, yolo = await asyncio.to_thread(_resolve_bind_identity, self.session_id, env)
             claimed = await pool.acquire(
                 self.session_id,
                 owner_id,
