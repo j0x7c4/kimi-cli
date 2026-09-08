@@ -204,6 +204,89 @@ class TestLogForwarding:
         assert depth["n"] == 1  # re-entry was refused, not merely deduplicated
 
 
+class TestWarmPhaseDiagVisibility:
+    """预热阶段的诊断帧不能被丢掉 —— 那正是准备失败的高发区。
+
+    在 Pod 被认领之前，读这条流的是 warmpool 的握手读者而**不是**
+    ``CCISessionProcess._read_loop``（后者才认识 kimo_diag）。原实现把所有
+    非 warm 行按 debug 丢弃，于是 ``_fetch_sandbox_assets`` 那类「记了日志但
+    不抛异常」的失败在 gateway 侧完全不可见 —— Pod 能起来、却服务不了任何
+    认领。2026-09-08 验证日志回流功能本身时发现：帧确实发出来了，在这里被
+    静默吃掉。
+    """
+
+    def test_diag_frame_is_recognised(self):
+        from kimi_cli.web.warmpool.manager import _warm_diag_frame
+
+        frame = _warm_diag_frame(
+            b'{"kimo_diag": "worker_log", "level": "WARNING", "text": "assets missing"}\n'
+        )
+        assert frame is not None
+        assert frame["kimo_diag"] == "worker_log"
+        assert frame["text"] == "assets missing"
+
+    def test_non_diag_lines_are_not_mistaken_for_frames(self):
+        from kimi_cli.web.warmpool.manager import _warm_diag_frame
+
+        assert _warm_diag_frame(b"not json at all\n") is None
+        assert _warm_diag_frame(b'{"warm": "ready"}\n') is None  # a warm frame, not diag
+        assert _warm_diag_frame(b'{"kimo_diag": 42}\n') is None  # key must be a str
+        assert _warm_diag_frame(b"[1,2,3]\n") is None  # JSON but not an object
+
+    async def test_await_frame_logs_the_diag_instead_of_dropping_it(self, monkeypatch):
+        """🔴 The behaviour, not just the helper.
+
+        Asserting only that ``_warm_diag_frame`` decodes correctly would pass even
+        if ``_await_frame`` never called it — which is exactly the state that hid
+        this gap in the first place. So drive the real read loop and assert the
+        frame reached the log.
+        """
+        import asyncio
+
+        from kimi_cli.web.runner import warm_protocol as wp
+        from kimi_cli.web.warmpool import manager as mgr_mod
+
+        logged: list[tuple[str, dict]] = []
+
+        class _StubLogger:
+            def info(self, msg, **kw):
+                logged.append((msg, kw))
+
+            def debug(self, msg, **kw):
+                logged.append(("DEBUG:" + msg, kw))
+
+            def error(self, msg, **kw):
+                logged.append(("ERROR:" + msg, kw))
+
+        monkeypatch.setattr(mgr_mod, "logger", _StubLogger())
+
+        class _Stream:
+            def __init__(self, lines):
+                self._lines = list(lines)
+
+            async def readline(self):
+                await asyncio.sleep(0)
+                return self._lines.pop(0) if self._lines else b""
+
+        stream = _Stream(
+            [
+                b'{"kimo_diag": "worker_log", "level": "WARNING", "text": "assets missing"}\n',
+                wp.encode(wp.FRAME_READY, ok=True).encode("utf-8"),
+            ]
+        )
+
+        # ``_await_frame`` touches no instance state, so a bare object is a
+        # sufficient ``self`` here.
+        frame = await mgr_mod.WarmPoolManager._await_frame(
+            object(), stream, wp.FRAME_READY, timeout=5.0
+        )
+
+        assert frame is not None and frame.get(wp.WARM_KEY) == wp.FRAME_READY
+        diag_logs = [kw for msg, kw in logged if "warm-diag" in msg]
+        assert len(diag_logs) == 1, f"诊断帧没有被记录，实际日志: {logged}"
+        assert diag_logs[0]["payload"]["text"] == "assets missing"
+
+
 class TestGatewayWireSignal:
     """The gateway logs *what the worker is waiting on* — requests only, never events."""
 

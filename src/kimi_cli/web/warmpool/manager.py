@@ -88,6 +88,24 @@ _WARM_FAILED = "failed"
 _WARM_SKIPPED = "skipped"
 
 
+def _warm_diag_frame(line: bytes | str) -> dict | None:
+    """Decode a worker ``kimo_diag`` frame, else ``None``.
+
+    Same contract as :func:`kimi_cli.web.runner.process._diag_frame`; kept local
+    to avoid importing the runner from the pool. If that contract ever changes,
+    both sides must change together — the frame key is the wire.
+    """
+    import json  # noqa: PLC0415
+
+    try:
+        obj = json.loads(line)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(obj, dict) and isinstance(obj.get("kimo_diag"), str):
+        return obj
+    return None
+
+
 class WarmPod:
     """One warmed Pod the manager still owns (Running, worker awaiting bind)."""
 
@@ -623,7 +641,22 @@ class WarmPoolManager:
                 return None  # EOF: the worker died
             frame = wp.decode(line)
             if frame is None:
-                logger.debug("[warmpool] skipping non-warm line: {line!r}", line=line[:200])
+                # 🔴 The worker's diagnostic frames arrive on this same stream, and
+                # during the warm phase THIS reader is the only one reading it —
+                # ``CCISessionProcess._read_loop`` (which knows about kimo_diag)
+                # does not take over until the Pod is claimed. Dropping them at
+                # debug level made the warm phase a blind spot precisely where
+                # preparation failures live: ``_fetch_sandbox_assets`` logs
+                # download failures **without raising**, so a Pod can boot fine
+                # and still be unable to serve any claim — and until 2026-09-08
+                # that log line was invisible from the gateway (found while
+                # verifying the log-forwarding feature itself: frames were being
+                # emitted and silently eaten here).
+                diag = _warm_diag_frame(line)
+                if diag is not None:
+                    logger.info("[kimo][warm-diag] {payload}", payload=diag)
+                else:
+                    logger.debug("[warmpool] skipping non-warm line: {line!r}", line=line[:200])
                 continue
             kind = frame.get(wp.WARM_KEY)
             if kind == frame_type:
