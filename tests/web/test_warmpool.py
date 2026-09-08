@@ -153,16 +153,17 @@ class FakeStore:
         row.update(state=STATE_READY, pod_ip=pod_ip, endpoint=endpoint)
         return True
 
-    def claim(self, session_id, owner_id):
+    def claim(self, session_id, owner_id, pod_name):
+        """Targeted claim — mirrors ``WHERE state='ready' AND ... AND pod_name=?``.
+
+        Modelling this as "any ready row" (what the SQL used to do) is exactly
+        what hid the 2026-09-07 HIGH from the suite: two claimers could win each
+        other's row and the tests never noticed.
+        """
         with self._lock:
-            candidates = [
-                r
-                for r in sorted(self.rows.values(), key=lambda r: r["seq"])
-                if r["state"] == STATE_READY and r["owner_id"] is None
-            ]
-            if not candidates:
+            row = self.rows.get(pod_name)
+            if row is None or row["state"] != STATE_READY or row["owner_id"] is not None:
                 return None
-            row = candidates[0]
             row.update(state=STATE_CLAIMED, kimo_session_id=session_id, owner_id=owner_id)
             return dict(row)
 
@@ -565,6 +566,77 @@ class TestProbe:
         assert mgr.stats()["pooled"] == 1
 
 
+class TestReviewHighRegressions:
+    """2026-09-07 审查两条 HIGH 的回归守卫。
+
+    两条都只在 ``size >= 2`` 或「认领与探活重叠」时现形，而当时的套件只在
+    默认 size=1 下验并发 —— 缺陷因此对测试完全隐形。
+    """
+
+    async def test_each_claimer_wins_the_pod_it_reserved(self):
+        """两个并发认领各拿自己预留的 Pod，不会互相抢走对方的行。
+
+        取「任意一条 ready 行」时：A 预留 pod1 却认领到 pod2 的行、B 反之，
+        两边都走 foreign_pod 分支把两行标 dead，而两个健康 Pod 仍留在 _pods
+        里 —— 池子既不能服务也不会补池，两个 Pod 一直在计费。
+        """
+        spawner = FakeSpawner()
+        store = FakeStore()
+        mgr = _manager(spawner, store, size=2)
+        assert await mgr.refill() == 2
+        pods = {p.pod_name for p in mgr._pods.values()}
+        assert len(pods) == 2
+
+        results = await asyncio.gather(
+            *(
+                mgr.acquire(uuid4(), f"user-{i}", yolo=True, agent="diabetes-expert", env={})
+                for i in range(2)
+            )
+        )
+
+        winners = [r for r in results if r is not None]
+        assert len(winners) == 2, "两个 Pod 都在池里，两个认领都该成功"
+        won = {h.handle_id for h, _ in winners}
+        assert won == pods, f"认领到的不是预留的那两个 Pod: {won} vs {pods}"
+        # 没有任何一行被误标 dead（foreign_pod 分支不该被走到）。认领后各自
+        # 触发的后台补池会再插 warming 行，那是正常行为、不参与本断言。
+        assert [r["state"] for r in store.rows.values() if r["pod_name"] in pods] == [
+            STATE_CLAIMED,
+            STATE_CLAIMED,
+        ]
+        assert STATE_DEAD not in {r["state"] for r in store.rows.values()}
+        assert spawner.stopped == []
+
+    async def test_probe_skips_a_pod_claimed_since_the_snapshot(self):
+        """探活途中被认领的 Pod 不能再收到 warm ping。
+
+        probe 取完快照就开始 await；此刻被认领的 Pod 已经属于一个活跃会话，
+        往它 stdin 写 ping 会和该会话的 JSON-RPC 读循环打架，等不到 pong ⇒
+        _fail_pod 把用户正在用的 Pod 删掉。
+        """
+        spawner = FakeSpawner()
+        store = FakeStore()
+        mgr = _manager(spawner, store, size=1)
+        await mgr.refill()
+        pod = next(iter(mgr._pods.values()))
+        pod_name = pod.pod_name
+
+        # 模拟「快照之后、探活之前被认领」：Pod 已移出池子，但 probe 手里
+        # 还攥着快照里的引用。
+        claimed = await mgr.acquire(uuid4(), "hechun-7", yolo=True, agent="diabetes-expert", env={})
+        assert claimed is not None
+        writes_after_claim = len(pod.stream.written)
+
+        # 直接把过期快照喂给 probe 的循环：monkeypatch _pods 已空，probe 应
+        # 认出这个 Pod 不再属于池子并跳过它。
+        result = await mgr._probe_pods([pod])
+
+        assert result == [], "已被认领的 Pod 不该出现在探活结果里"
+        assert len(pod.stream.written) == writes_after_claim, "不该再往活跃会话写 ping"
+        assert store.rows[pod_name]["state"] == STATE_CLAIMED, "更不该被判死"
+        assert pod_name not in spawner.stopped, "用户正在用的 Pod 被删了"
+
+
 class TestFrozenClaimSQL:
     def test_claim_statement_keeps_the_frozen_shape(self):
         """The claim must stay ONE conditional UPDATE (plan §0.3).
@@ -581,6 +653,15 @@ class TestFrozenClaimSQL:
         assert "SET state='claimed'" in src
         assert "WHERE state='ready' AND owner_id IS NULL" in src
         assert "ORDER BY created_at LIMIT 1" in src
+        # 🔴 The claim must be TARGETED at the reserved Pod (2026-09-07 review,
+        # HIGH): "any ready row" let two concurrent claimers win each other's
+        # row, both take the foreign_pod branch, and strand two billing Pods in
+        # a pool that can neither serve nor refill.
+        assert "AND pod_name=:pod" in src
+        # …and the winning row is re-read by pod_name, not by session id: a
+        # stale ``claimed`` row for the same session would otherwise make
+        # ``.first()`` non-deterministic and send the caller at the wrong Pod.
+        assert "WHERE pod_name=:pod AND state='claimed'" in src
         # The winning row is re-read only AFTER the UPDATE decided the winner.
         update_at = src.index("UPDATE")
         select_at = src.index("SELECT")
@@ -606,7 +687,7 @@ class TestFrozenClaimSQL:
             raise _Deadlock(1213, "Deadlock found when trying to get lock")
 
         store._claim_once = _boom  # type: ignore[method-assign]
-        assert store.claim("sid", "owner") is None
+        assert store.claim("sid", "owner", "kimo-sandbox-x") is None
 
     def test_deadlock_is_recognised_through_the_sqlalchemy_wrapper(self):
         """The errno must be found wherever the driver stack parks it.
@@ -649,7 +730,7 @@ class TestFrozenClaimSQL:
 
         store._claim_once = _boom  # type: ignore[method-assign]
         with pytest.raises(RuntimeError):
-            store.claim("sid", "owner")
+            store.claim("sid", "owner", "kimo-sandbox-x")
 
 
 class TestWarmProtocol:

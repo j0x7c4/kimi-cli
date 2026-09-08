@@ -178,14 +178,14 @@ class WarmPoolStore:
                 return False
             raise
 
-    def claim(self, session_id: str, owner_id: str) -> dict[str, Any] | None:
-        """Atomically claim the oldest ready Pod for ``session_id``.
+    def claim(self, session_id: str, owner_id: str, pod_name: str) -> dict[str, Any] | None:
+        """Atomically claim ``pod_name`` — the Pod the caller reserved — for ``session_id``.
 
         This is the frozen contract from plan §0.3 — the ONE legal way to claim:
 
             UPDATE kimo_sandbox_pod
                SET state='claimed', kimo_session_id=?, owner_id=?, claimed_at=now(6)
-             WHERE state='ready' AND owner_id IS NULL
+             WHERE state='ready' AND owner_id IS NULL AND pod_name=?
              ORDER BY created_at LIMIT 1
 
         A single conditional single-row UPDATE *is* the mutual exclusion: with N
@@ -193,14 +193,23 @@ class WarmPoolStore:
         gets 0 and degrades to a cold start (which is a normal path, not an
         error, and must not alert).
 
-        Returns the claimed row, or ``None`` when the pool was empty. The row is
-        re-read inside the same transaction by ``kimo_session_id`` — unique per
-        claim — so the winner learns *which* Pod it won.
+        🔴 ``pod_name`` is not an optimisation — it is what makes the row the
+        caller wins the *same* Pod it holds in memory (2026-09-07 review, HIGH).
+        Claiming "any ready row" let two concurrent claimers each win the
+        other's row: both then took the ``foreign_pod`` branch, marked both rows
+        dead, and left two healthy Pods stranded in ``_pods`` — a pool that can
+        neither serve nor refill while both Pods keep billing.
+
+        Returns the claimed row, or ``None`` when this Pod was no longer
+        claimable (already taken, marked dead by the backend sweep, or gone).
+        The row is re-read inside the same transaction **by ``pod_name``** so
+        the read is deterministic even if a stale ``claimed`` row for the same
+        session survived a failed release.
         """
         from sqlalchemy import text  # noqa: PLC0415
 
         try:
-            return self._claim_once(text, session_id, owner_id)
+            return self._claim_once(text, session_id, owner_id, pod_name)
         except Exception as e:  # noqa: BLE001 — only 1213 is swallowed, see below
             if _is_deadlock(e):
                 logger.info(
@@ -211,17 +220,19 @@ class WarmPoolStore:
                 return None
             raise
 
-    def _claim_once(self, text: Any, session_id: str, owner_id: str) -> dict[str, Any] | None:
+    def _claim_once(
+        self, text: Any, session_id: str, owner_id: str, pod_name: str
+    ) -> dict[str, Any] | None:
         with self._engine.begin() as conn:
             res = conn.execute(
                 text(
                     f"UPDATE {TABLE} "
                     "SET state='claimed', kimo_session_id=:sid, owner_id=:owner, "
                     "claimed_at=now(6) "
-                    "WHERE state='ready' AND owner_id IS NULL "
+                    "WHERE state='ready' AND owner_id IS NULL AND pod_name=:pod "
                     "ORDER BY created_at LIMIT 1"
                 ),
-                {"sid": session_id, "owner": owner_id},
+                {"sid": session_id, "owner": owner_id, "pod": pod_name},
             )
             if res.rowcount != 1:
                 return None
@@ -229,9 +240,9 @@ class WarmPoolStore:
                 conn.execute(
                     text(
                         f"SELECT pod_name, state, kimo_session_id, owner_id, pod_ip, endpoint "
-                        f"FROM {TABLE} WHERE kimo_session_id=:sid AND state='claimed'"
+                        f"FROM {TABLE} WHERE pod_name=:pod AND state='claimed'"
                     ),
-                    {"sid": session_id},
+                    {"pod": pod_name},
                 )
                 .mappings()
                 .first()

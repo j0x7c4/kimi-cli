@@ -423,7 +423,9 @@ class WarmPoolManager:
                 return None
             del self._pods[reserved.pod_name]
 
-        row = await asyncio.to_thread(self._store.claim, str(session_id), owner_id)
+        row = await asyncio.to_thread(
+            self._store.claim, str(session_id), owner_id, reserved.pod_name
+        )
         if row is None:
             # Someone else (or a backend health sweep) got there first. Put the
             # Pod back: the row may have been marked dead, in which case the next
@@ -433,9 +435,11 @@ class WarmPoolManager:
             logger.info("[warmpool] claim for {sid} found no ready row; cold start", sid=session_id)
             return None
         if row.get("pod_name") != reserved.pod_name:
-            # The claimed row belongs to a Pod this process does not hold (a
-            # second gateway instance, or a stale row). We cannot drive it, so
-            # kill the row and degrade rather than hand back a Pod we can't reach.
+            # Unreachable as long as the claim is targeted (the UPDATE carries
+            # ``pod_name``), and kept as a belt-and-braces assertion: if a future
+            # change ever loosens the WHERE clause back to "any ready row", this
+            # is the branch that would fire — loudly — instead of silently
+            # handing back a Pod this process cannot drive.
             logger.warning(
                 "[warmpool] claimed row {got} is not the Pod we hold ({have}); "
                 "marking it dead and cold-starting",
@@ -520,12 +524,46 @@ class WarmPoolManager:
         """
         async with self._lock:
             pods = list(self._pods.values())
+        results = await self._probe_pods(pods)
+        refilled = await self.refill()
+        return {
+            "size": self._size,
+            "pooled": len(self._pods),
+            "probed": results,
+            "refilled": refilled,
+        }
+
+    async def _probe_pods(self, pods: list[WarmPod]) -> list[dict[str, Any]]:
+        """Ping each Pod in ``pods`` that is still ours; drop the ones that don't pong.
+
+        Split out of :meth:`probe` so the stale-snapshot path is directly
+        testable: ``pods`` is by construction a *snapshot*, and what matters is
+        what this does with an entry that left the pool since it was taken.
+        """
         results: list[dict[str, Any]] = []
         for pod in pods:
             seq = uuid4().hex[:8]
             alive = False
             detail = ""
             async with pod.lock:
+                # 🔴 Re-check membership *inside* pod.lock before touching the
+                # stream (2026-09-07 review, HIGH). The snapshot above is stale
+                # the moment we await: a Pod claimed since then belongs to a live
+                # session, and a warm ``ping`` written into its stdin would race
+                # that session's JSON-RPC read loop — no pong would come back and
+                # we would delete the Pod a user is actively talking to.
+                # Ordering makes this airtight: ``_acquire_inner`` removes the Pod
+                # from ``_pods`` under ``_lock`` *before* it takes ``pod.lock`` to
+                # bind. So either we see it gone and skip, or we hold ``pod.lock``
+                # first and the bind waits for a ping/pong on a still-warm Pod.
+                async with self._lock:
+                    still_pooled = self._pods.get(pod.pod_name) is pod
+                if not still_pooled:
+                    logger.debug(
+                        "[warmpool] pod {pod} left the pool mid-probe; skipping it",
+                        pod=pod.pod_name,
+                    )
+                    continue
                 try:
                     await pod.stream.sendall(wp.encode(wp.FRAME_PING, seq=seq).encode("utf-8"))
                     pong = await self._await_frame(
@@ -548,13 +586,7 @@ class WarmPoolManager:
                     self._pods.pop(pod.pod_name, None)
                 await self._fail_pod(pod.pod_name, pod.handle, pod.stream, reason="probe_failed")
             results.append({"pod_name": pod.pod_name, "alive": alive, "detail": detail})
-        refilled = await self.refill()
-        return {
-            "size": self._size,
-            "pooled": len(self._pods),
-            "probed": results,
-            "refilled": refilled,
-        }
+        return results
 
     def stats(self) -> dict[str, Any]:
         total = self._hits + self._misses
