@@ -201,12 +201,21 @@ def _fetch_sandbox_assets() -> None:
                     "[sandbox-assets] rejected {n} unsafe tar member(s) (path traversal)",
                     n=rejected,
                 )
+            # ``filter="tar"`` is explicit on purpose. Without it Python 3.12+
+            # emits a DeprecationWarning per extract, and 3.14 flips the default
+            # outright. Those warnings go to stderr, which ``enable_logging``
+            # redirects into the logger at ERROR — so once worker logs are
+            # forwarded to the gateway (2026-09-08) every Pod start printed four
+            # bogus ERROR frames, drowning the real ones. "tar" keeps today's
+            # semantics (traversal is already rejected by our own member filter
+            # above) rather than "data", which would additionally strip modes —
+            # a behaviour change not worth risking on the asset path.
             for m in members:
                 if _is_kb(m.name):
-                    tar.extract(m, path=work_dir)  # noqa: S202 — members filtered above
+                    tar.extract(m, path=work_dir, filter="tar")  # noqa: S202
                     n_kb += 1
                 else:
-                    tar.extract(m, path=home)  # noqa: S202 — members filtered above
+                    tar.extract(m, path=home, filter="tar")  # noqa: S202
         logger.info(
             "[sandbox-assets] fetched + extracted bundle ({size} bytes, {n} members; "
             "{nkb} knowledge->{wd}, rest->{home})",
