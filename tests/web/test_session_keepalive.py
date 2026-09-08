@@ -22,8 +22,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
-
 from kimi_cli.web.runner import cci_process as cp
 
 
